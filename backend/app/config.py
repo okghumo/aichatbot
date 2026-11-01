@@ -28,6 +28,8 @@ Key settings:
     DOCS_ENABLED           — true to keep /docs and /openapi.json when CHAT_API_KEY is set, default false
     DASHBOARD_API_KEY      — bearer token guarding GET /api/admin/session-summaries (optional,
                              endpoints return 503 if unset — see app/dashboard.py)
+    FOLLOWUP_SCHEDULE_MINUTES — comma list: minutes of silence after the bot's last message before
+                             follow-up 1, 2, 3...; default 15,60,360,1440 (see app/followup.py)
     IDLE_SUMMARY_MINUTES   — inactivity before a session is summarized for the dashboard, default 15
     SUMMARY_WEBHOOK_URL    — optional; POSTed with every newly generated session summary
                              (see app/dashboard.py _send_webhook). Blank = feature off.
@@ -89,6 +91,7 @@ class Settings(BaseSettings):
     # runs regardless of REDIS_URL/DASHBOARD_API_KEY; it just no-ops without
     # them (nothing to scan / no way to authenticate reads).
     dashboard_api_key: str = ""              # blank = /api/admin/* returns 503
+    followup_schedule_minutes: str = "15,60,360,1440"   # when the CRM should ask for each follow-up
     idle_summary_minutes: int = 15           # inactivity before summarizing a session
     idle_scan_interval_seconds: int = 300    # how often to check for idle sessions
     # Push delivery of generated summaries to an external system — optional,

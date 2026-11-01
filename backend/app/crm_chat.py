@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from app import session_store
 from app.session_store import mask_session_id
 from app.config import settings
+from app.emoji_limit import limit_emojis
 from app.handoff import detect_handoff
 from app.llm import stream_chat_response
 from app.price_overview import price_overview_text
@@ -118,6 +119,7 @@ def _make_result(request: ChatRequest, session_id: str, parts: list[str], error:
     fixed = bool(reply) and reply == price_overview_text()   # the fixed price message keeps its ~struck~ prices and stays one bubble
     if (request.channel or "whatsapp") == "whatsapp" and not fixed:
         reply = _to_whatsapp_strike(reply)
+        reply = limit_emojis(reply, [m.content for m in request.messages if m.role == "assistant"])
     last_user = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
     reason = None if capped else handoff_state.get("reason") or detect_handoff(last_user)
     if reason and not reply:

@@ -207,6 +207,19 @@ def test_handoff_tool_sets_state_when_enabled(monkeypatch):
     assert ("delta", "Team will follow up.") in events
 
 
+def test_lead_ticket_tool_not_offered_to_crm_but_kept_for_web(monkeypatch):
+    _, offered = _drive(monkeypatch, {})
+    assert "escalate_and_capture_lead" not in offered[0]
+    assert "search_web" in offered[0]
+    _, offered = _drive(monkeypatch, None)
+    assert "escalate_and_capture_lead" in offered[0]
+
+
+def test_handoff_prompt_forbids_ticket_numbers():
+    from app.handoff import HANDOFF_PROMPT
+    assert "never mention or invent a ticket" in HANDOFF_PROMPT
+
+
 def test_handoff_tool_not_offered_to_web_chat(monkeypatch):
     async def no_tools():
         return []

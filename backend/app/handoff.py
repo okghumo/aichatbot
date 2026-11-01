@@ -32,7 +32,7 @@ HANDOFF_SCHEMA = {
             "Pass this conversation to a human salesperson. Call it when the customer asks for a "
             "person, you cannot answer, they complain, report a payment problem, want to change "
             "or cancel an existing booking, or ask for an extra discount or a lower price (reason discount_request). After calling it, reply with ONE short friendly sentence "
-            "saying the team will follow up here. Do not use escalate_and_capture_lead for this."
+            "saying the team will follow up here. Never mention a ticket or reference number."
         ),
         "parameters": {
             "type": "object",
@@ -48,7 +48,10 @@ HANDOFF_PROMPT = (
     "## Human handoff\n"
     "Earlier 'assistant' messages may have been written by human staff, not you; do not contradict "
     "or repeat them. When the customer needs a person (see the request_human_handoff tool), call "
-    "that tool instead of escalate_and_capture_lead.\n"
+    "that tool. There is no lead or ticket system in this chat: wherever the knowledge base says to use "
+    "escalate_and_capture_lead or to give a LEAD-XXXXX ticket ID (groups of 5+, custom packages, a failed "
+    "booking, a callback), call request_human_handoff instead and never mention or invent a ticket, "
+    "reference or LEAD- number, even if earlier messages in the chat contain one.\n"
     "### Discount requests\n"
     "When the customer asks or pushes for an extra discount, a special or lower price, a coupon or a "
     "better deal (including 'Gujarati/student/group discount' or 'last price'): never say no, never say "
@@ -57,7 +60,17 @@ HANDOFF_PROMPT = (
     "in at most two short sentences: the prices shown are already discounted, and you will pass this to a "
     "teammate who can decide on it. Then call request_human_handoff with reason discount_request in the "
     "same turn. Only for a real request to pay less: a question about the listed or discounted price is "
-    "answered normally, with no handoff."
+    "answered normally, with no handoff.\n"
+    "### Photos and videos\n"
+    "When the customer asks you to send or show photos, pictures, videos, clips or reels: never say you "
+    "cannot send them. Reply in their language in two or three short sentences: they can see some pictures "
+    "on the activity page, with that page's link as a bare URL (build it only from the destination and "
+    "activity slugs in a tool result as https://www.bucketlistt.com/<destination>/<activity>; never guess a "
+    "slug, and if you do not have them use https://www.bucketlistt.com); and if they want more pictures, "
+    "tell them in the first person that you will share the photos after some time (say 'I', never 'the team' "
+    "or 'a teammate'). Then call request_human_handoff with reason other in the same turn. "
+    "Do not push slots or booking in that message. Only for a real request to see media: a question like "
+    "'is the video included?' is answered normally, with no handoff."
 )
 
 GUJARATI_DISCOUNT_PROMPT = (
@@ -106,6 +119,11 @@ _BACKSTOP = [
         r"\b(?:kam|reduce|lower|decrease)\s+(?:kar|karo|kardo|kar\s*do|karna|kijiye|the\s+(?:price|rate)|"
         r"(?:price|rate))\b|\b(?:last|final|best|lowest)\s+(?:price|rate)\b|"
         r"\bbargain|\bnegotiat|\bhaggl|\bcoupons?\b|\bpromo\s*codes?\b", re.I)),
+    # Asking to be SENT or SHOWN media ("share me the photos", "video bhej do"). Not "is the video included?".
+    ("other", re.compile(
+        r"\b(?:share|send|show|bhej\w*|dikha\w*|dekh\w*|see)\b.{0,25}\b(?:photos?|pics?|pictures?|images?|videos?|clips?|reels?)\b|"
+        r"\b(?:photos?|pics?|pictures?|images?|videos?|clips?|reels?)\b.{0,25}\b(?:bhej\w*|dikha\w*|dekh\w*|send|share|show)\b|"
+        r"^\W*(?:any |more )?(?:photos?|pics?|pictures?|images?|videos?)\W*$", re.I)),
     ("customer_requested_human", re.compile(
         r"\b(human|real person|live agent|representative|customer (care|support|service))\b|"
         r"\b(talk|speak|connect me|chat) (to|with) (an? |the |your )?(agent|person|human|someone|team|manager|owner)\b|"

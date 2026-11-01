@@ -701,6 +701,30 @@ If a reply would otherwise be empty with no error (the model returned nothing), 
 now report `error: "empty_reply"` instead of an empty `reply`, so a gateway never sends a blank
 message. Treat it like any other `error`: retry.
 
+### 12.9a Follow-ups for silent chats: `POST /api/v2/followup`
+
+The bot cannot message a customer on its own. The CRM keeps the timers and the sending, and asks the bot
+for the text when a timer fires. Same `Authorization: Bearer <CHAT_API_KEY>` as `/api/v2/chat`.
+
+**Schedule** (minutes of silence after the bot's last message, `FOLLOWUP_SCHEDULE_MINUTES`, default
+`15,60,360,1440`): follow-up 1 at 15 min, 2 at 1 h, 3 at 6 h, 4 at 1 day.
+
+Request: `{"messages": [...full chat so far...], "session_id": "...", "attempt": 1}` (`attempt` 1 to 4).
+
+Response (HTTP 200, errors in-band):
+
+| Field | Meaning |
+|---|---|
+| `send` | `true`: send `reply`. `false`: send nothing. |
+| `reply` | The follow-up text (no emoji, no prices). |
+| `next_in_minutes` | Wait this long, then ask for the next follow-up. `null` after the last one. |
+| `template_required` | `true` when the follow-up is due 23 h or more after the bot's last message, which is outside WhatsApp's 24 h free-text window. Send an approved template (use `reply` as its text). |
+| `skip_reason` | `customer_replied`, `opted_out` (customer wrote stop / not interested), `sequence_finished`, `no_customer_message`. |
+| `error` | `followup_failed` or `empty_reply`: send nothing, retry later. |
+
+CRM rules: cancel the pending timers as soon as the customer replies, a human takes over the chat, or a
+booking is made. Never send a follow-up to a chat where `opted_out` was returned.
+
 ### 12.10 Test deployment notes (Render free tier)
 
 - The service sleeps after 15 minutes without traffic; the first request afterwards can take

@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.crm_chat import router as crm_router
+from app.followup import router as followup_router
 from app.dashboard import get_summary, idle_scan_loop, list_summaries
 from app.llm import stream_chat_response
 from app.mcp_client import close_http_client
@@ -67,6 +68,7 @@ app = FastAPI(
 )
 
 app.include_router(crm_router)
+app.include_router(followup_router)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,

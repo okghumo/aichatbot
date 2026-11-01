@@ -103,10 +103,10 @@ WHATSAPP_FORMAT_PROMPT = (
     "original/MRP price and never strike anything through: this overrides the price-anchoring rule above.\n"
     "- Aim for under about 200 characters, and never over about 400 unless they asked for a full price "
     "list. Cut filler, intros and recaps.\n"
-    "- Add ONE emoji that fits the moment to most replies, at the end of a sentence: 🪂 bungee, 🚣 rafting, "
-    "🪁 paragliding, 🙌 or 😊 for confirming or welcoming, 📍 for pickup or location, 📞 for a call, "
-    "🎥 for video, 🙂 to reassure. Never more than 2 in a reply, none when they are upset or "
-    "complaining, and not on every line of a price list.\n"
+    "- Go light on emojis. Use at most ONE, and only in about one reply out of two (a warm welcome, a "
+    "congratulation, a reassurance). Never put one on a price list, on a "
+    "question about dates or numbers, in a follow-up, or when the customer is upset or complaining, and "
+    "never in two replies in a row (so at most every second reply).\n"
     "- End with at most ONE short, natural question to keep the chat moving, when it fits.\n"
     "- Never mention tools, lookups, searches or any internal step (no 'that tool call', 'let me check my "
     "system'). Just answer, or say you'll check.\n"
@@ -653,7 +653,9 @@ async def _run_tool_loop(
     if not _payment_link_allowed(channel, session_id):
         mcp_tools = [t for t in mcp_tools if t["function"]["name"] != PAYMENT_TOOL]
     logger.info("Loaded %d MCP tools, %d local tools", len(mcp_tools), len(TOOL_SCHEMAS))
-    all_tools = TOOL_SCHEMAS + mcp_tools + ([HANDOFF_SCHEMA] if handoff_state is not None else [])
+    # CRM (v2) chats hand off through request_human_handoff: the lead/ticket tool is web-only.
+    local_tools = [t for t in TOOL_SCHEMAS if handoff_state is None or t["function"]["name"] != "escalate_and_capture_lead"]
+    all_tools = local_tools + mcp_tools + ([HANDOFF_SCHEMA] if handoff_state is not None else [])
     first_iter_tools = [
         t for t in all_tools if t["function"]["name"] != "search_web"
     ] if mcp_tools else all_tools
