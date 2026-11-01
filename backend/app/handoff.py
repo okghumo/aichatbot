@@ -21,6 +21,7 @@ HANDOFF_REASONS = [
     "payment_issue",
     "booking_change",
     "discount_request",
+    "group_booking",
     "other",
 ]
 
@@ -61,6 +62,11 @@ HANDOFF_PROMPT = (
     "teammate who can decide on it. Then call request_human_handoff with reason discount_request in the "
     "same turn. Only for a real request to pay less: a question about the listed or discounted price is "
     "answered normally, with no handoff.\n"
+    "### Groups and custom requests\n"
+    "A group of 5 or more people, a corporate or college outing, or a custom package or itinerary is "
+    "handled by the team. Reply in their language in one or two short sentences: say the team will check "
+    "the date and the group rate and message them here (no ticket, no reference number). Then call "
+    "request_human_handoff with reason group_booking in the same turn.\n"
     "### Photos and videos\n"
     "When the customer asks you to send or show photos, pictures, videos, clips or reels: never say you "
     "cannot send them. Reply in their language in two or three short sentences: they can see some pictures "
@@ -124,6 +130,13 @@ _BACKSTOP = [
         r"\b(?:share|send|show|bhej\w*|dikha\w*|dekh\w*|see)\b.{0,25}\b(?:photos?|pics?|pictures?|images?|videos?|clips?|reels?)\b|"
         r"\b(?:photos?|pics?|pictures?|images?|videos?|clips?|reels?)\b.{0,25}\b(?:bhej\w*|dikha\w*|dekh\w*|send|share|show)\b|"
         r"^\W*(?:any |more )?(?:photos?|pics?|pictures?|images?|videos?)\W*$", re.I)),
+    # A group of 5 or more, or a custom package: the knowledge base sends these to the team (the web
+    # bot used the lead tool for it). Needs the number next to a people word, so a bare "8" or "15 jan" never matches.
+    ("group_booking", re.compile(
+        r"\bgroup (?:of|size)\s*(?:[5-9]|[1-9]\d{1,2})\b|"
+        r"\b(?:[5-9]|[1-9]\d{1,2})\s*(?:people|persons?|pax|members|log|loko|friends|adults|guests|travell?ers)\b|"
+        r"\bcustom (?:package|itinerary|plan|trip)|\b(?:corporate|college|school|office) (?:trip|outing|group)\b",
+        re.I)),
     ("customer_requested_human", re.compile(
         r"\b(human|real person|live agent|representative|customer (care|support|service))\b|"
         r"\b(talk|speak|connect me|chat) (to|with) (an? |the |your )?(agent|person|human|someone|team|manager|owner)\b|"
@@ -136,6 +149,18 @@ _BACKSTOP = [
         re.I,
     )),
 ]
+
+
+# The v2 chat has no ticket system. If the model invents "ticket LEAD-12345" anyway (the web KB
+# tells it to), remove the number and its lead-in word so the customer never sees it.
+_TICKET_REF = re.compile(
+    r"(?:\b(?:ticket|reference|ref)\b(?:[ \t]*(?:number|no\.?|id)\b)?[ \t]*(?:is\b|:|-)?[ \t]*)?"
+    r"[*_`#]*\bLEAD-(?:\d+|X+)\b[*_`]*[ \t]*", re.I)
+
+
+def strip_ticket_numbers(text: str) -> str:
+    text = re.sub(r"\(\s*\)", "", _TICKET_REF.sub("", text))   # drop a leftover "()"
+    return re.sub(r"[ \t]+([.,!?])", r"\1", text).strip().lstrip(",;:").lstrip()
 
 
 def detect_handoff(text: str) -> str | None:

@@ -563,13 +563,16 @@ never in a browser or mobile app.
 | `reply` | string | Text to send to the customer, already WhatsApp-formatted. Empty when `error` is set. Split at 4096 chars if needed. |
 | `messages` | string[] | The same text as `reply`, split into short WhatsApp-sized bubbles: one per paragraph, at most 4 (extra paragraphs are merged into the last), none over 4000 chars, and a bullet list stays in one bubble. **Send these one by one, in order, instead of `reply`**, ideally with a typing indicator and a short pause (about 1 to 3 s) before each. Empty when `reply` is empty. Older clients can keep using `reply`; the text is identical. |
 | `handoff` | bool | `true`: queue the conversation for a human and stop calling the bot until an agent hands it back. `reply` then holds a short "connecting you to our team" message, which you should deliver. |
-| `handoff_reason` | string \| null | `customer_requested_human`, `cannot_answer`, `complaint`, `payment_issue`, `booking_change` or `other`. Advisory only: it is set by the model or by a keyword check on the customer's last message. |
+| `handoff_reason` | string \| null | `customer_requested_human`, `cannot_answer`, `complaint`, `payment_issue`, `booking_change`, `discount_request`, `group_booking` or `other`. Advisory only: it is set by the model or by a keyword check on the customer's last message. |
 | `session_capped` | bool | `true`: the session hit its message cap. **Do not show `reply`.** Start a new `session_id` and resend the same customer message. |
 | `error` | string \| null | Non-null means the request failed (LLM overloaded, rate-limited, internal error). **Never forward this text to the customer.** |
 
 Handoff is decided two ways: the model calls its `request_human_handoff` tool, or a keyword
 backstop on the customer's last message matches (refund, charged twice, complaint, scam, "talk to
 a human", "customer care", "manager", and similar). A capped session never reports a handoff.
+A group of 5 or more people ("8 people", "group of 12"), a custom package or a corporate/college
+outing also hands off with reason `group_booking`. This chat has no ticket system: replies never contain a
+ticket or `LEAD-` number (the bot cannot call the lead tool, and any such number is stripped).
 
 ### 12.3 Errors and status codes
 

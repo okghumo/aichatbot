@@ -18,7 +18,7 @@ from app import session_store
 from app.session_store import mask_session_id
 from app.config import settings
 from app.emoji_limit import limit_emojis
-from app.handoff import detect_handoff
+from app.handoff import detect_handoff, strip_ticket_numbers
 from app.llm import stream_chat_response
 from app.price_overview import price_overview_text
 from app.rate_limit import has_valid_chat_key
@@ -115,7 +115,7 @@ def _require_key(http_request: Request) -> None:
 def _make_result(request: ChatRequest, session_id: str, parts: list[str], error: str | None,
                  capped: bool, handoff_state: dict) -> ChatV2Response:
     """Turn what stream_chat_response produced into the v2 response (shared by JSON and stream)."""
-    reply = "".join(parts).strip()
+    reply = strip_ticket_numbers("".join(parts))
     fixed = bool(reply) and reply == price_overview_text()   # the fixed price message keeps its ~struck~ prices and stays one bubble
     if (request.channel or "whatsapp") == "whatsapp" and not fixed:
         reply = _to_whatsapp_strike(reply)

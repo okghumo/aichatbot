@@ -215,6 +215,27 @@ def test_lead_ticket_tool_not_offered_to_crm_but_kept_for_web(monkeypatch):
     assert "escalate_and_capture_lead" in offered[0]
 
 
+def test_invented_ticket_numbers_never_reach_the_customer(monkeypatch):
+    from app.handoff import strip_ticket_numbers
+    assert strip_ticket_numbers("Team will call you. Your ticket *LEAD-11505* is created.") == "Team will call you. Your is created."
+    assert strip_ticket_numbers("Ticket number: LEAD-12345, we will call.") == "we will call."
+    assert strip_ticket_numbers("Ref #LEAD-XXXXX saved.") == "saved."
+    assert strip_ticket_numbers("Done! (LEAD-99999).") == "Done!."
+    assert strip_ticket_numbers("No ticket here, lead time is short.") == "No ticket here, lead time is short."
+    _fake_stream(monkeypatch, [_frame(delta="Team will follow up. Ticket LEAD-11505", done=False), _frame(delta="", done=True)])
+    j = client.post("/api/v2/chat", json=_body(), headers=AUTH).json()
+    assert j["reply"] == "Team will follow up." and "LEAD" not in "".join(j["messages"])
+
+
+def test_groups_of_five_plus_and_custom_requests_hand_off():
+    from app.handoff import detect_handoff
+    for text in ["25 December, 8 loko nu rate", "group of 12 for rafting", "we are 6 people", "custom package please",
+                 "college trip for bungee"]:
+        assert detect_handoff(text) == "group_booking", text
+    for text in ["4 people, bungee", "15 jan ko slot hai?", "8", "rafting price", "2 adults 1 child"]:
+        assert detect_handoff(text) is None, text
+
+
 def test_handoff_prompt_forbids_ticket_numbers():
     from app.handoff import HANDOFF_PROMPT
     assert "never mention or invent a ticket" in HANDOFF_PROMPT
