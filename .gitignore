@@ -41,3 +41,7 @@ AGENTS.md
 whatsapp chat dataset/
 whatsapp*chat*dataset*
 *.chats.json
+
+# Customer data written at runtime (phone numbers, chat summaries). Never commit.
+backend/data/leads.json
+backend/data/session_summaries.json

@@ -1,0 +1,3 @@
+# Runtime customer data must never ship in the image
+data/leads.json
+data/session_summaries.json
