@@ -59,24 +59,19 @@ _forced_choice_rejected: set[str] = set()
 # a long run of digits from being re-scanned from every position (quadratic: 800 ms at 8,000 digits).
 _PRICE_RE = re.compile(r"₹\s?\d|\brs\.?\s?\d|\binr\s?\d|(?<![\d,])\d[\d,]*\s?(?:rs|rupees|inr)\b", re.IGNORECASE)
 
-# WhatsApp + logged-in only (see build_messages): offer the customer a choice at checkout.
-# Recency beats the static "you cannot take payment" lines, which still hold for the web chat.
-PAYMENT_CHOICE_PROMPT = (
-    "## Payment on WhatsApp — OVERRIDES the 'you cannot take payment' lines above\n"
-    "You can send a payment link here. Once the cart is confirmed with get_cart, ask ONE short question: "
-    "should you send a payment link right here on WhatsApp, or would they rather pay on the website, where "
-    "the cart is already filled in (they log in with the same phone number)? Send neither link until they choose.\n"
-    "- Link here: call create_payment_link, then send the URL it returns exactly as given, with the amount. "
-    "Never edit, shorten or invent a link.\n"
-    "- Website: give https://www.bucketlistt.com/experiences/cart.\n"
-    "- If create_payment_link fails or returns no URL, say so briefly, give the website cart link and offer a "
-    "teammate call.\n"
-    "- Call create_payment_link only after they choose the link, and once per cart: if you already sent a link "
-    "and the cart has not changed, resend it. If the cart changed, tell them the old link is outdated and "
-    "create a new one.\n"
-    "- If you gave them a coupon code in this chat, a payment link cannot apply it: tell them the code works at "
-    "the website checkout, send the cart link, and send a payment link only if they prefer it without the code.\n"
-    "- You never take payment or confirm it went through: they pay on the link's page and bucketlistt confirms."
+# WhatsApp only (the web chat keeps the KB's OTP + cart booking flow untouched). Recency beats the KB.
+WHATSAPP_BOOKING_PROMPT = (
+    "## Booking on WhatsApp — OVERRIDES the KB's 'Booking flow' (OTP and cart) and 'Auth flow etiquette'\n"
+    "In this chat never call send_otp, verify_otp, add_to_cart, get_cart, update_cart_item, remove_from_cart "
+    "or create_payment_link, and never ask for an OTP. When the customer wants to book:\n"
+    "1. Confirm the activity, date and slot from the live catalog tools.\n"
+    "2. Ask ONE short question offering exactly two options: book it themselves on the website, or have a "
+    "representative call them to book it. Do nothing more until they choose.\n"
+    "3. Website: give the activity page link, built only from the destination and activity slugs in a tool "
+    "result as https://www.bucketlistt.com/<destination>/<activity>; never guess a slug, otherwise use "
+    "https://www.bucketlistt.com.\n"
+    "4. Representative call: confirm the phone number to call (the customer may already be chatting from it), "
+    "then call request_human_handoff with reason other and tell them a representative will call them."
 )
 
 # Appended LAST to the dynamic block when the caller says channel="whatsapp"
@@ -374,9 +369,12 @@ async def _resolve_message_content(msg: ChatMessage) -> str | list[dict]:
     })
     return blocks
 
-def _payment_link_allowed(channel: str | None, session_id: str | None) -> bool:
-    """The payment-link tool and its prompt exist only for a logged-in WhatsApp session."""
-    return channel == "whatsapp" and bool(get_token(session_id))
+# WhatsApp books via website or a representative call: no login, cart or payment tools, ever. Enforced both
+# where tools are offered and where they would run, so a model that ignores the prompt still can't use them.
+WHATSAPP_BLOCKED_TOOLS = {
+    "send_otp", "verify_otp", "add_to_cart", "get_cart", "update_cart_item", "remove_from_cart",
+    "get_my_bookings", PAYMENT_TOOL,
+}
 
 
 async def build_messages(
@@ -454,7 +452,7 @@ async def build_messages(
 
     # If this session already authenticated earlier, tell the model so it skips
     # the OTP entirely — the server injects the cached token into cart calls.
-    if get_token(session_id):
+    if get_token(session_id) and channel != "whatsapp":
         dynamic_parts.append(
             "## Auth status\nThe user is ALREADY LOGGED IN in this session. Do NOT call send_otp or "
             "verify_otp again and do NOT ask for their phone/OTP — proceed directly with cart and booking "
@@ -501,9 +499,8 @@ async def build_messages(
         dynamic_parts.append(HANDOFF_PROMPT)
         if asks_gujarati_discount([m.content for m in chat_messages if m.role == "user"]):
             dynamic_parts.append(GUJARATI_DISCOUNT_PROMPT)
-    if _payment_link_allowed(channel, session_id):
-        dynamic_parts.append(PAYMENT_CHOICE_PROMPT)
     if channel == "whatsapp":
+        dynamic_parts.append(WHATSAPP_BOOKING_PROMPT)
         dynamic_parts.append(WHATSAPP_FORMAT_PROMPT)
     if region:
         dynamic_parts.append(region_prompt(region))
@@ -650,8 +647,9 @@ async def _run_tool_loop(
     logger.info(
         "[bungee-summary] tool %s this turn", "enabled" if bungee_query else "disabled (non-bungee query)"
     )
-    if not _payment_link_allowed(channel, session_id):
-        mcp_tools = [t for t in mcp_tools if t["function"]["name"] != PAYMENT_TOOL]
+    # Payment links are offered to no one now; WhatsApp also loses login, cart and bookings (web keeps them).
+    blocked = WHATSAPP_BLOCKED_TOOLS if channel == "whatsapp" else {PAYMENT_TOOL}
+    mcp_tools = [t for t in mcp_tools if t["function"]["name"] not in blocked]
     logger.info("Loaded %d MCP tools, %d local tools", len(mcp_tools), len(TOOL_SCHEMAS))
     # CRM (v2) chats hand off through request_human_handoff: the lead/ticket tool is web-only.
     local_tools = [t for t in TOOL_SCHEMAS if handoff_state is None or t["function"]["name"] != "escalate_and_capture_lead"]
@@ -812,6 +810,9 @@ async def _run_tool_loop(
         needs_mcp = any(c.function.name in MCP_ALLOWED_TOOLS for c in tool_calls)
 
         async def _exec(call, mcp_session):
+            if channel == "whatsapp" and call.function.name in WHATSAPP_BLOCKED_TOOLS:
+                logger.warning("Blocked %s on WhatsApp", call.function.name)
+                return {"status": "error", "message": "Not available here. Offer the website or a representative call."}
             if call.function.name == HANDOFF_TOOL:
                 try:
                     reason = json.loads(call.function.arguments or "{}").get("reason")

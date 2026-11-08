@@ -44,10 +44,3 @@ def test_coupon_never_reaches_web_or_non_handoff_callers():
     ask = ["Gujarti ke liye special discount"]
     assert GUJARATI_COUPON not in _system(ask, handoff=False, channel=None)
     assert GUJARATI_COUPON not in _system(ask, handoff=False)
-
-
-def test_payment_prompt_warns_that_a_coupon_needs_the_website(monkeypatch):
-    from app import token_store
-    token_store.set_token("wa-g-1", "tok")
-    assert "payment link cannot apply it" in _system(["bungee price?"])
-    token_store._store.clear()

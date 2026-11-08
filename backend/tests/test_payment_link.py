@@ -39,22 +39,16 @@ def _offered_tools(monkeypatch, channel, logged_in):
     return seen["tools"], json.dumps(messages[0]["content"])
 
 
-def test_whatsapp_logged_in_gets_tool_and_choice_prompt(monkeypatch):
+def test_whatsapp_never_gets_cart_or_payment_tools_even_when_logged_in(monkeypatch):
     tools, system = _offered_tools(monkeypatch, "whatsapp", logged_in=True)
-    assert "create_payment_link" in tools
-    assert "OVERRIDES the 'you cannot take payment'" in system
+    assert "create_payment_link" not in tools and "get_cart" not in tools
+    assert "ALREADY LOGGED IN" not in system
 
 
-def test_whatsapp_not_logged_in_gets_neither(monkeypatch):
-    tools, system = _offered_tools(monkeypatch, "whatsapp", logged_in=False)
-    assert "create_payment_link" not in tools
-    assert "OVERRIDES the 'you cannot take payment'" not in system
-
-
-def test_web_never_gets_it_even_when_logged_in(monkeypatch):
+def test_web_still_gets_its_tools_and_login_note(monkeypatch):
     tools, system = _offered_tools(monkeypatch, None, logged_in=True)
-    assert "create_payment_link" not in tools
-    assert "OVERRIDES the 'you cannot take payment'" not in system
+    assert "get_cart" in tools and "create_payment_link" not in tools
+    assert "ALREADY LOGGED IN" in system
 
 
 def test_auth_token_is_injected_into_payment_call():
@@ -78,3 +72,10 @@ def test_payment_call_keeps_only_schema_args():
     assert out == {"contactPersonName": "A", "contactNumber": "9", "authToken": "tok-123",
                    "items": [{k: v for k, v in item.items() if k not in ("price", "amount")}]}
     assert out["items"][0]["totalParticipants"] == 2   # the old regex wrongly dropped this ("total")
+
+
+def test_booking_choice_prompt_is_whatsapp_only(monkeypatch):
+    _, wa = _offered_tools(monkeypatch, "whatsapp", logged_in=False)
+    _, web = _offered_tools(monkeypatch, None, logged_in=False)
+    assert "Booking on WhatsApp" in wa
+    assert "Booking on WhatsApp" not in web
