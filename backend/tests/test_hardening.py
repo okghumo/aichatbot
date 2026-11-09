@@ -61,10 +61,10 @@ def test_idle_buckets_are_swept(monkeypatch):
     assert list(rate_limit._hits) == ["new"]
 
 
-def test_attachment_upload_requires_the_key():
+def test_attachment_upload_is_open_to_the_website(monkeypatch):
+    monkeypatch.setattr(settings, "chat_api_key", "k")
     files = {"file": ("a.txt", b"hello", "text/plain")}
-    assert client.post("/api/chat/attachments", files=files).status_code == 401
-    assert client.post("/api/chat/attachments", files=files, headers={"Authorization": "Bearer k"}).status_code != 401
+    assert client.post("/api/chat/attachments", files=files).status_code != 401
 
 
 def test_overlong_session_id_rejected():

@@ -85,15 +85,12 @@ def health() -> dict:
     return {"status": "ok", "model": settings.llm_model}
 
 
-def _require_chat_key(http_request: Request) -> None:
-    """No-op unless CHAT_API_KEY is set; then 401 without a matching Bearer token."""
-    if settings.chat_api_key and not has_valid_chat_key(http_request):
-        raise HTTPException(401, "Unauthorized")
-
-
 @app.post("/api/chat")
 async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse:
     """Stream a chat completion as Server-Sent Events.
+
+    Open to the public website: the browser cannot hold a secret. CHAT_API_KEY only
+    guards /api/v2/* (the CRM); here a valid key merely unlocks the WhatsApp channel.
 
     session_id resolution: an explicit value in the request body wins (a
     frontend that manages its own), else an existing session_id cookie,
@@ -101,7 +98,6 @@ async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse
     frontend that does nothing special still gets a stable session across
     requests, with no client-side UUID generation required.
     """
-    _require_chat_key(http_request)
     session_id = request.session_id or http_request.cookies.get("session_id") or str(uuid.uuid4())
     logger.info(
         "POST /api/chat — %d messages, session=%s",
@@ -133,7 +129,6 @@ async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse
 @app.post("/api/session/user-info")
 async def store_user_info(request: UserInfoRequest, http_request: Request) -> dict:
     """Store captured user contact information in their Redis session."""
-    _require_chat_key(http_request)
     if not request.session_id:
         return {"status": "error", "message": "No session ID provided"}
         
@@ -186,7 +181,6 @@ async def upload_attachment(http_request: Request, file: UploadFile = File(...))
     the payload ~33% and breaks the existing text-length cap semantics on
     ChatMessage.content).
     """
-    _require_chat_key(http_request)
     try:
         result = await store_attachment(file)
     except AttachmentError as exc:

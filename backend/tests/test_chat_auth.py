@@ -38,14 +38,14 @@ def test_open_when_key_unset(monkeypatch):
     assert client.post("/api/chat", json=PAYLOAD).status_code == 200
 
 
-def test_401_without_or_with_wrong_key(monkeypatch):
+def test_web_endpoints_stay_open_when_key_is_set(monkeypatch):
     _hits.clear()
     monkeypatch.setattr(settings, "chat_api_key", "s3cret")
     _stub_stream(monkeypatch)
-    assert client.post("/api/chat", json=PAYLOAD).status_code == 401
+    assert client.post("/api/chat", json=PAYLOAD).status_code == 200
     bad = {"Authorization": "Bearer nope"}
-    assert client.post("/api/chat", json=PAYLOAD, headers=bad).status_code == 401
-    assert client.post("/api/session/user-info", json={"session_id": "x", "user_info": {}}).status_code == 401
+    assert client.post("/api/chat", json=PAYLOAD, headers=bad).status_code == 200
+    assert client.post("/api/session/user-info", json={"session_id": "x", "user_info": {}}).status_code == 200
 
 
 def test_valid_key_passes_and_skips_rate_limit(monkeypatch):
