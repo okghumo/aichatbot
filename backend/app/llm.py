@@ -28,7 +28,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 from app.mcp_client import ALLOWED_TOOLS as MCP_ALLOWED_TOOLS
 from app.mcp_client import BUNGEE_SUMMARY_TOOL, PAYMENT_TOOL, _DotDict, call_catalog_tool, load_catalog_tools
-from app.price_overview import price_overview_text, should_send_overview
+from app.price_overview import offer_prompt, price_overview_text, should_send_overview
 from app.region import REGION_STYLES, region_from_messages, region_prompt
 from app.retriever import retrieve
 from app.schemas import ChatMessage
@@ -449,6 +449,9 @@ async def build_messages(
         "Use this to resolve relative dates like 'today', 'tomorrow', 'this weekend', "
         "or 'next Saturday' into a concrete YYYY-MM-DD when a tool needs a date."
     )
+
+    if channel == "whatsapp" and (offer := offer_prompt()):
+        dynamic_parts.append(offer)
 
     # If this session already authenticated earlier, tell the model so it skips
     # the OTP entirely — the server injects the cached token into cart calls.

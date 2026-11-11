@@ -121,3 +121,9 @@ def test_live_offer_replaces_the_standard_message_and_expires_after_its_last_day
     assert live.startswith("Hi! Welcome to Bucketlistt!") and po.SENT_MARKER in live
     assert "117M Bungee Jump: Rs. 5,000" in live and "31 Dec 2026" in live and "9286136741" in live
     assert po._offer_text(date(2027, 1, 1)) == ""             # expired -> caller falls back to price_overview.md
+
+
+def test_offer_prompt_lists_the_offer_only_while_live(monkeypatch):
+    assert "117M Bungee Jump: Rs. 5,000" in po.offer_prompt()
+    _no_offers(monkeypatch)
+    assert po.offer_prompt() == ""

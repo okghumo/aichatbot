@@ -95,6 +95,17 @@ def _offer_text(today: date) -> str:
         return ""
 
 
+def offer_prompt() -> str:
+    """System-prompt section making the model quote live-offer prices for single-activity questions too."""
+    offers = _active_offers(datetime.now(ZoneInfo("Asia/Kolkata")).date())
+    if not offers:
+        return ""
+    return ("## Live offer (overrides catalog/KB prices)\n"
+            "A limited-time offer is running. When the customer asks the price of an activity listed below, quote the "
+            "OFFER price and include its free extras. Never quote the old price for these activities. Activities not "
+            "listed here keep their normal price.\n\n" + "\n\n".join(o["text"].strip() for o in offers))
+
+
 def price_overview_text() -> str:
     """The live-offer message while an offer is unexpired (IST), else the standard one; "" if the file is missing.
     Read on every call (tiny files) so an offer ends at midnight with no restart or cron job."""
