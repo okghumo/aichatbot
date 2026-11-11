@@ -4,10 +4,12 @@ Used when a WhatsApp customer asks for the whole price list or "everything you o
 file to change it (restart to reload). A question about ONE activity ("bungee price?") is not matched and
 goes to the model as usual. Prices in the file are typed by hand: update them when the catalog changes.
 """
+import json
 import logging
 import re
-from functools import lru_cache
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 
@@ -66,10 +68,40 @@ def should_send_overview(user_texts: list[str], assistant_texts: list[str]) -> b
             and not any(SENT_MARKER in t for t in assistant_texts))
 
 
-@lru_cache(maxsize=1)
+def _data_dir() -> Path:
+    return Path(settings.system_prompt_file).parent
+
+
+def _active_offers(today: date) -> list[dict]:
+    """Offers in data/offers.json whose `expires` (YYYY-MM-DD, inclusive) is not past. Bad/missing file -> none."""
+    try:
+        offers = json.loads((_data_dir() / "offers.json").read_text(encoding="utf-8"))
+        return [o for o in offers if date.fromisoformat(o["expires"]) >= today and o["text"].strip()]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+def _offer_text(today: date) -> str:
+    """data/offer-template.json filled with the live offers, or "" when none is live (or the template is broken)."""
+    offers = _active_offers(today)
+    if not offers:
+        return ""
+    try:
+        template = json.loads((_data_dir() / "offer-template.json").read_text(encoding="utf-8"))["template"]
+        expires = min(date.fromisoformat(o["expires"]) for o in offers).strftime("%d %b %Y")
+        return template.format(offers="\n\n".join(o["text"].strip() for o in offers), expires=expires).strip()
+    except (OSError, ValueError, KeyError, TypeError):
+        logger.warning("Offer template unusable: falling back to the standard price message")
+        return ""
+
+
 def price_overview_text() -> str:
-    """The message, or "" if the file is missing (then nothing is short-circuited)."""
-    path = Path(settings.system_prompt_file).parent / "price_overview.md"
+    """The live-offer message while an offer is unexpired (IST), else the standard one; "" if the file is missing.
+    Read on every call (tiny files) so an offer ends at midnight with no restart or cron job."""
+    offer = _offer_text(datetime.now(ZoneInfo("Asia/Kolkata")).date())
+    if offer:
+        return offer
+    path = _data_dir() / "price_overview.md"
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:

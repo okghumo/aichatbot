@@ -6,6 +6,7 @@ from app import llm as llm_module
 from app import session_store
 from app.config import settings
 from app.main import app
+from app import price_overview as po
 from app.price_overview import price_overview_text, should_send_overview, wants_price_overview
 from app.rate_limit import _hits
 
@@ -45,7 +46,12 @@ def test_only_early_in_the_chat_and_only_once():
     assert not should_send_overview([], [])
 
 
-def test_message_is_the_one_the_user_wrote():
+def _no_offers(monkeypatch):
+    monkeypatch.setattr(po, "_active_offers", lambda _today: [])
+
+
+def test_message_is_the_one_the_user_wrote(monkeypatch):
+    _no_offers(monkeypatch)
     t = price_overview_text()
     assert t.startswith("Hi! Welcome to Bucketlistt!") and t.endswith("📞 Call/WhatsApp: 8511838237")
     assert "~₹2,500~ ₹2,000" in t and "219m Maa Ganga Bungy, Devprayag: ₹6,000" in t
@@ -107,3 +113,11 @@ def test_state_tag_language_is_remembered_even_though_the_fixed_message_is_sent(
         _ = [f async for f in llm_module.stream_chat_response(msgs, "wa-po-region", channel="whatsapp", handoff_state={})]
         return await session_store.get_region("wa-po-region")
     assert asyncio.run(run()) == "GJ"
+
+
+def test_live_offer_replaces_the_standard_message_and_expires_after_its_last_day():
+    from datetime import date
+    live = po._offer_text(date(2026, 12, 31))                 # last day still counts
+    assert live.startswith("Hi! Welcome to Bucketlistt!") and po.SENT_MARKER in live
+    assert "117M Bungee Jump: Rs. 5,000" in live and "31 Dec 2026" in live and "9286136741" in live
+    assert po._offer_text(date(2027, 1, 1)) == ""             # expired -> caller falls back to price_overview.md
