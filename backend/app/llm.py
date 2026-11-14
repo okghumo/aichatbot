@@ -27,24 +27,136 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 from app.mcp_client import ALLOWED_TOOLS as MCP_ALLOWED_TOOLS
-from app.mcp_client import BUNGEE_SUMMARY_TOOL, _DotDict, call_catalog_tool, load_catalog_tools
+from app.mcp_client import BUNGEE_SUMMARY_TOOL, PAYMENT_TOOL, _DotDict, call_catalog_tool, load_catalog_tools
+from app.price_overview import offer_prompt, price_overview_text, should_send_overview
+from app.region import REGION_STYLES, region_from_messages, region_prompt
 from app.retriever import retrieve
 from app.schemas import ChatMessage
 from app.attachments import resolve_attachment
-from app.flow_guard import is_protected_turn
+from app.flow_guard import is_hard_protected, is_protected_turn
+from app.handoff import (
+    GUJARATI_DISCOUNT_PROMPT, HANDOFF_PROMPT, HANDOFF_SCHEMA, HANDOFF_TOOL, HANDOFF_REASONS, asks_gujarati_discount, detect_handoff,
+)
 from app.token_store import (
     AUTH_TOOLS, extract_token, get_token, set_token,
     extract_phone, set_pending_phone, pop_pending_phone,
+    persist_token, persist_pending_phone, forget_pending_phone, restore_session_auth,
 )
 from app.tools import TOOL_SCHEMAS, dispatch_tool
 from app.session_store import (
     save_turn, should_prompt_login, mark_login_prompted, should_nudge_for_contact,
-    save_verified_phone, get_message_count,
+    save_verified_phone, get_message_count, mask_session_id, save_region, get_region,
 )
 from app.stream_sanitizer import StreamSanitizer
 
 MAX_TOOL_ITERATIONS = 8
+
+# Models that rejected a forced tool_choice (e.g. claude-sonnet-5-5). Remembered for the life of the
+# process so later turns skip the doomed request instead of paying a failed round trip every time.
+_forced_choice_rejected: set[str] = set()
+
+# A price in a draft reply. Used to catch "answered from memory" on catalog questions. The (?<![\d,]) keeps
+# a long run of digits from being re-scanned from every position (quadratic: 800 ms at 8,000 digits).
+_PRICE_RE = re.compile(r"₹\s?\d|\brs\.?\s?\d|\binr\s?\d|(?<![\d,])\d[\d,]*\s?(?:rs|rupees|inr)\b", re.IGNORECASE)
+
+# WhatsApp only (the web chat keeps the KB's OTP + cart booking flow untouched). Recency beats the KB.
+WHATSAPP_BOOKING_PROMPT = (
+    "## Booking on WhatsApp — OVERRIDES the KB's 'Booking flow' (OTP and cart) and 'Auth flow etiquette'\n"
+    "In this chat never call send_otp, verify_otp, add_to_cart, get_cart, update_cart_item, remove_from_cart "
+    "or create_payment_link, and never ask for an OTP. When the customer wants to book:\n"
+    "1. Confirm the activity, date and slot from the live catalog tools.\n"
+    "2. In that SAME message, send the activity page link (a bare URL built only from the destination and "
+    "activity slugs in a tool result as https://www.bucketlistt.com/<destination>/<activity>; never guess a "
+    "slug, otherwise use https://www.bucketlistt.com) and ask ONE short question offering exactly two "
+    "options: book it themselves on the website with that link, or have a representative call them to book it.\n"
+    "3. If they choose the website, just confirm briefly; do not send the link again.\n"
+    "4. Representative call: confirm the phone number to call (the customer may already be chatting from it), "
+    "then call request_human_handoff with reason other and tell them a representative will call them."
+)
+
+# Appended LAST to the dynamic block when the caller says channel="whatsapp"
+# (recency wins over the KB's own table/markdown guidance). Not in the cached
+# static block, so web traffic's prompt cache is untouched.
+WHATSAPP_FORMAT_PROMPT = (
+    "## Channel: WhatsApp — OVERRIDES any formatting and length guidance above\n"
+    "You are texting a customer on WhatsApp. Write like a friendly person texting, "
+    "not like a brochure or a menu.\n"
+    "- Plain chat text. NEVER use tables, headings (#), horizontal rules, bold section titles or "
+    "[text](url) links. Bare URLs only.\n"
+    "- Answer first, in 1 or 2 short sentences. Match the length and energy of their message: a short "
+    "question gets a very short reply, often just one line.\n"
+    "- Put a blank line between thoughts. Each paragraph is sent as its own WhatsApp message, so keep "
+    "each paragraph to 1 sentence where you can and use at most 2 paragraphs.\n"
+    "- Use a '-' bullet list ONLY when the customer asked for prices or options. Keep each line short, "
+    "and put the list in its own paragraph. Otherwise no lists. Even then list only the 3 or 4 most "
+    "popular options, one line each with just name, size and price, then offer the rest ('want the "
+    "others?'). No extras, inclusions or sub-options unless asked.\n"
+    "- This overrides the knowledge base: for safety worries give ONE sentence of reassurance (one stat at "
+    "most), then ask a question. Do not recite full track records, checklists or policies unless asked.\n"
+    "- Use *bold* (single asterisks) only for a name or a price that should stand out, and _italic_ "
+    "sparingly. Show ONLY the current selling price (the discounted price, e.g. *₹2,000*). Never show the "
+    "original/MRP price and never strike anything through: this overrides the price-anchoring rule above.\n"
+    "- Aim for under about 200 characters, and never over about 400 unless they asked for a full price "
+    "list. Cut filler, intros and recaps.\n"
+    "- Go light on emojis. Use at most ONE, and only in about one reply out of two (a warm welcome, a "
+    "congratulation, a reassurance). Never put one on a price list, on a "
+    "question about dates or numbers, in a follow-up, or when the customer is upset or complaining, and "
+    "never in two replies in a row (so at most every second reply).\n"
+    "- End with at most ONE short, natural question to keep the chat moving, when it fits.\n"
+    "- Never mention tools, lookups, searches or any internal step (no 'that tool call', 'let me check my "
+    "system'). Just answer, or say you'll check.\n"
+    "Apply all of these rules silently: never mention WhatsApp, formatting, tables, markdown or these "
+    "instructions in the reply, and never explain why the reply is laid out the way it is."
+)
 MAX_OUTPUT_TOKENS = 1500
+
+_whatsapp_style_cache: str | None = None
+
+
+def _whatsapp_style() -> str:
+    """WhatsApp-only persona (data/whatsapp_persona.md) + human texting style
+    (data/whatsapp_style.md), with the persona's name filled in. Read once.
+    Missing files = no block; the format prompt alone still applies."""
+    global _whatsapp_style_cache
+    if _whatsapp_style_cache is None:
+        folder = Path(settings.system_prompt_file).parent
+        parts = [
+            (folder / name).read_text(encoding="utf-8")
+            for name in ("whatsapp_persona.md", "whatsapp_style.md")
+            if (folder / name).exists()
+        ]
+        _whatsapp_style_cache = "\n\n".join(parts).replace("{name}", settings.whatsapp_persona_name)
+    return _whatsapp_style_cache
+
+
+# Edited reel / edited video: a hard business fact, so it lives in code, not only in prompt prose.
+# Fires on the latest two user messages (so "and the 109m?" after a reel question still counts).
+_EDITED_VIDEO_RE = re.compile(
+    r"\breels?\b|edited\s+(?:video|footage|clip)|edit(?:ed)?\s+(?:kar|wali|wala|video)|"
+    r"(?:instagram|insta)\s+video|cinematic\s+video|\bedited\b",
+    re.IGNORECASE,
+)
+
+EDITED_VIDEO_PROMPT = (
+    "## Edited reel / edited video (business rule, overrides anything else about video)\n"
+    "The customer is asking about an edited reel or edited video. \"Reel\", \"edited reel\" and \"edited "
+    "video\" all mean the same thing. An edited reel is offered at only two places:\n"
+    "- Dronecraft River Rafting: the edited reel (drone + DSLR) is FREE with every route and variation.\n"
+    "- Splash Bungy: an edited video / reel is available ONLY for the 109 m bungee, at Rs 1,000 extra. "
+    "The standard video that Splash prices already include is NOT the edited reel: the Rs 1,000 is only for "
+    "the edited version. No other Splash activity (85 m, swing, zipline, etc.) has an edited reel.\n"
+    "- Every other operator and activity: do not offer or promise an edited reel. Say only what video the "
+    "live catalog lists for that activity (check get_activity / get_activity_addons if you do not already "
+    "have it), exactly as listed, and if it lists no video, say so. Never present a generic video or GoPro "
+    "add-on price as an edited reel.\n"
+    "Answer only what they asked, in your usual short style, and do not bring this up if they did not ask."
+)
+
+
+def _wants_edited_video(chat_messages: list[ChatMessage]) -> bool:
+    recent = [m.content for m in chat_messages if m.role == "user"][-2:]
+    return any(_EDITED_VIDEO_RE.search(text) for text in recent)
+
 
 # Matches bungee/bungy/bungie, case-insensitive — the only trigger for
 # exposing BUNGEE_SUMMARY_TOOL to the LLM (see _wants_bungee_summary).
@@ -71,7 +183,7 @@ def _wants_bungee_summary(messages: list[dict]) -> bool:
 # messages never even reach this check.
 _CATALOG_RE = re.compile(
     r"bung|raft|paraglid|zipline|flying fox|camp|balloon|paramotor|activit|"
-    r"price|book|slot|avail|destination|rishikesh|mussoorie|manali|jaipur|"
+    r"price|slot|avail|destination|rishikesh|mussoorie|manali|jaipur|"
     r"jim corbett|tehri|ujjain|bir billing",
     re.IGNORECASE,
 )
@@ -257,10 +369,20 @@ async def _resolve_message_content(msg: ChatMessage) -> str | list[dict]:
     })
     return blocks
 
+# WhatsApp books via website or a representative call: no login, cart or payment tools, ever. Enforced both
+# where tools are offered and where they would run, so a model that ignores the prompt still can't use them.
+WHATSAPP_BLOCKED_TOOLS = {
+    "send_otp", "verify_otp", "add_to_cart", "get_cart", "update_cart_item", "remove_from_cart",
+    "get_my_bookings", PAYMENT_TOOL,
+}
+
+
 async def build_messages(
     chat_messages: list[ChatMessage],
     session_id: str | None = None,
     nudge_contact: bool = False,
+    channel: str | None = None,
+    handoff_enabled: bool = False,
 ) -> list[dict]:
     """Prepend the server-controlled system prompt to the client conversation.
 
@@ -279,6 +401,18 @@ async def build_messages(
     static_block = base_prompt
     if settings.mcp_server_url:
         static_block += LIVE_CATALOG_TOOLS_PROMPT
+
+    # State tag on the first message ("... (GJ)"): WhatsApp only. Strip it from what the model sees and
+    # remember it, so the language holds even if the CRM later trims the history.
+    region = None
+    if channel == "whatsapp":
+        chat_messages, region = region_from_messages(chat_messages)
+        if region and session_id:
+            await save_region(session_id, region)
+        elif session_id:
+            region = await get_region(session_id)
+        if region not in REGION_STYLES:
+            region = None
 
     # --- DYNAMIC block: everything that varies per call. Never mark this
     # cacheable — doing so would defeat the cache by changing the very prefix
@@ -316,9 +450,12 @@ async def build_messages(
         "or 'next Saturday' into a concrete YYYY-MM-DD when a tool needs a date."
     )
 
+    if channel == "whatsapp" and (offer := offer_prompt()):
+        dynamic_parts.append(offer)
+
     # If this session already authenticated earlier, tell the model so it skips
     # the OTP entirely — the server injects the cached token into cart calls.
-    if get_token(session_id):
+    if get_token(session_id) and channel != "whatsapp":
         dynamic_parts.append(
             "## Auth status\nThe user is ALREADY LOGGED IN in this session. Do NOT call send_otp or "
             "verify_otp again and do NOT ask for their phone/OTP — proceed directly with cart and booking "
@@ -340,6 +477,16 @@ async def build_messages(
             "with urgency='normal' to save it."
         )
 
+    latest_text = next((m.content for m in reversed(chat_messages) if m.role == "user"), "")
+    if settings.mcp_server_url and _CATALOG_RE.search(latest_text):
+        dynamic_parts.append(
+            "## Live data needed\n"
+            "This message asks about prices, activities or availability. Call the catalog tool first and answer "
+            "from its result. Never quote a price or availability from memory, even for a short question."
+        )
+    if _wants_edited_video(chat_messages):
+        dynamic_parts.append(EDITED_VIDEO_PROMPT)
+
     # Final guardrail — placed LAST so it benefits from recency bias.
     # The LLM tends to follow the last instruction most strongly.
     dynamic_parts.append(
@@ -351,13 +498,28 @@ async def build_messages(
         "first checking if they are open, as the entire category is likely closed."
     )
 
-    system_message = {
-        "role": "system",
-        "content": [
-            {"type": "text", "text": static_block, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": "\n\n".join(dynamic_parts)},
-        ],
-    }
+    if handoff_enabled:
+        dynamic_parts.append(HANDOFF_PROMPT)
+        if asks_gujarati_discount([m.content for m in chat_messages if m.role == "user"]):
+            dynamic_parts.append(GUJARATI_DISCOUNT_PROMPT)
+    if channel == "whatsapp":
+        dynamic_parts.append(WHATSAPP_BOOKING_PROMPT)
+        dynamic_parts.append(WHATSAPP_FORMAT_PROMPT)
+    if region:
+        dynamic_parts.append(region_prompt(region))
+
+    if channel == "whatsapp":
+        # The female WhatsApp persona replaces the website's "Bucky" name; web never takes this branch.
+        static_block = static_block.replace("Bucky", settings.whatsapp_persona_name)
+    system_blocks = [{"type": "text", "text": static_block, "cache_control": {"type": "ephemeral"}}]
+    if channel == "whatsapp" and _whatsapp_style():
+        # Own cached block between static and dynamic: WhatsApp calls read it at the
+        # cached-input rate; web calls never see it and keep their exact prompt.
+        system_blocks.append(
+            {"type": "text", "text": _whatsapp_style(), "cache_control": {"type": "ephemeral"}}
+        )
+    system_blocks.append({"type": "text", "text": "\n\n".join(dynamic_parts)})
+    system_message = {"role": "system", "content": system_blocks}
     resolved = [m.model_dump() for m in chat_messages[:-1]]
     if chat_messages:
         last = chat_messages[-1]
@@ -366,19 +528,40 @@ async def build_messages(
     return [system_message] + resolved
 
 
+# create_payment_link's real schema (live MCP): the server prices the booking from these ids, so the
+# model gets no way to send an amount. Anything outside this list (callbackUrl too: no redirects to
+# model-chosen URLs) is dropped.
+_PAYMENT_ARGS = {"authToken", "contactPersonName", "contactNumber", "contactEmail", "payAdvanceOnly", "items"}
+_PAYMENT_ITEM_ARGS = {"experienceId", "activityId", "timeSlotId", "timeSlotLabel", "bookingDate",
+                      "totalParticipants", "addOns"}
+
+
+def _strip_money_fields(args: dict) -> dict:
+    """Keep only the schema's known payment arguments. If the MCP ever adds an amount-like field, the model
+    still cannot set it until it is deliberately added here."""
+    out = {k: v for k, v in args.items() if k in _PAYMENT_ARGS}
+    if isinstance(out.get("items"), list):
+        out["items"] = [{k: v for k, v in i.items() if k in _PAYMENT_ITEM_ARGS}
+                        for i in out["items"] if isinstance(i, dict)]
+    return out
+
+
 def _inject_auth_token(call, session_id: str | None) -> None:
     """For an authenticated MCP tool, fill in the cached authToken so the user
     isn't re-prompted for an OTP. Mutates call.function.arguments in place."""
     if call.function.name not in AUTH_TOOLS:
         return
     token = get_token(session_id)
-    if not token:
+    if not token and call.function.name != PAYMENT_TOOL:
         return
     try:
         args = json.loads(call.function.arguments) if call.function.arguments else {}
     except (ValueError, TypeError):
         args = {}
-    args["authToken"] = token  # server-owned token always wins over anything the model guessed
+    if call.function.name == PAYMENT_TOOL:
+        args = _strip_money_fields(args)  # the model/customer never chooses what is charged
+    if token:
+        args["authToken"] = token  # server-owned token always wins over anything the model guessed
     call.function.arguments = json.dumps(args)
 
 
@@ -398,9 +581,11 @@ _TOOL_STATUS_LABELS = {
     "get_cart": "Fetching cart…",
     "update_cart_item": "Updating cart…",
     "remove_from_cart": "Removing from cart…",
+    "create_payment_link": "Creating payment link…",
     "get_my_bookings": "Fetching bookings…",
     "search_web": "Searching the web…",
     "escalate_and_capture_lead": "Creating support ticket…",
+    HANDOFF_TOOL: "Connecting you to our team…",
 }
 
 
@@ -408,7 +593,9 @@ async def _execute_tool(call, session_id: str | None, mcp_session=None) -> dict:
     """Execute a single tool call and return the result dict."""
     tool_name = call.function.name
     t0 = time.perf_counter()
-    logger.info("Executing tool: %s  args=%s", tool_name, call.function.arguments[:200] if call.function.arguments else "")
+    # OTP and payment tools carry the customer's phone number / contact details: never log their arguments.
+    logged_args = "<redacted>" if tool_name in ("send_otp", "verify_otp", PAYMENT_TOOL) else (call.function.arguments or "")[:200]
+    logger.info("Executing tool: %s  args=%s", tool_name, logged_args)
     try:
         if tool_name in MCP_ALLOWED_TOOLS:
             _inject_auth_token(call, session_id)
@@ -418,11 +605,14 @@ async def _execute_tool(call, session_id: str | None, mcp_session=None) -> dict:
                 # to the session/summary on its own, since a phone number
                 # nobody has verified proves nothing.
                 set_pending_phone(session_id, extract_phone(call.function.arguments))
+                await persist_pending_phone(session_id)
             elif tool_name == "verify_otp":
                 token = extract_token(result.get("result", ""))
                 set_token(session_id, token)
                 if token:
+                    await persist_token(session_id)
                     phone = extract_phone(call.function.arguments) or pop_pending_phone(session_id)
+                    await forget_pending_phone(session_id)
                     if phone:
                         await save_verified_phone(session_id, phone)
         else:
@@ -438,12 +628,19 @@ async def _execute_tool(call, session_id: str | None, mcp_session=None) -> dict:
 async def _run_tool_loop(
     messages: list[dict],
     session_id: str | None = None,
+    handoff_state: dict | None = None,
+    channel: str | None = None,
 ) -> AsyncGenerator[str | tuple[str, str], None]:
     """Run the tool-calling loop as an async generator.
 
     Every LLM call uses stream=True so the final answer streams token-by-token
     via yield ("delta", text).  Tool calls are reassembled from stream chunks
     transparently.  Status strings are yielded as plain strings.
+
+    handoff_state is None for the web chat (no handoff tool offered). The CRM
+    endpoint passes a dict; the model's request_human_handoff call then sets
+    handoff_state["reason"] — a side channel, so the yielded event shapes
+    (and every existing consumer of them) are unchanged.
     """
     t_loop_start = time.perf_counter()
     mcp_tools = await load_catalog_tools()
@@ -453,11 +650,20 @@ async def _run_tool_loop(
     logger.info(
         "[bungee-summary] tool %s this turn", "enabled" if bungee_query else "disabled (non-bungee query)"
     )
+    # Payment links are offered to no one now; WhatsApp also loses login, cart and bookings (web keeps them).
+    blocked = WHATSAPP_BLOCKED_TOOLS if channel == "whatsapp" else {PAYMENT_TOOL}
+    mcp_tools = [t for t in mcp_tools if t["function"]["name"] not in blocked]
     logger.info("Loaded %d MCP tools, %d local tools", len(mcp_tools), len(TOOL_SCHEMAS))
-    all_tools = TOOL_SCHEMAS + mcp_tools
+    # CRM (v2) chats hand off through request_human_handoff: the lead/ticket tool is web-only.
+    local_tools = [t for t in TOOL_SCHEMAS if handoff_state is None or t["function"]["name"] != "escalate_and_capture_lead"]
+    all_tools = local_tools + mcp_tools + ([HANDOFF_SCHEMA] if handoff_state is not None else [])
     first_iter_tools = [
         t for t in all_tools if t["function"]["name"] != "search_web"
     ] if mcp_tools else all_tools
+    empty_retries = 0
+    retract_ok = handoff_state is not None   # only the v2 consumers can drop text already streamed
+    price_retry_done = False
+    tool_used = False
     for iteration in range(MAX_TOOL_ITERATIONS):
         # Force a tool call only when it's actually plausible the message
         # needs the catalog — never for mid-flow/safety-sensitive turns
@@ -467,10 +673,14 @@ async def _run_tool_loop(
         # unnecessary forced tool call, never a blocked response, but a
         # protected turn getting force-routed toward the catalog tools is
         # still worth avoiding on principle.
+        # Short catalog questions ("bungee price", "rafting") only skip forcing for the hard-protected
+        # cases (OTP, phone, safety); the generic 3-word rule must not keep them off the live catalog.
+        # A model that already rejected forcing is not asked again.
         should_force = (
             iteration < 1
             and mcp_tools
-            and not is_protected_turn(_latest_user_message(messages))
+            and settings.llm_model not in _forced_choice_rejected
+            and not is_hard_protected(_latest_user_message(messages))
             and _wants_catalog(messages)
         )
         if should_force:
@@ -484,25 +694,37 @@ async def _run_tool_loop(
         from app.cache_limiter import _enforce_cache_limits
         safe_messages = _enforce_cache_limits(messages)
         
-        response = await litellm.acompletion(
+        call_kwargs = dict(
             model=settings.llm_model,
             messages=safe_messages,
             tools=iter_tools,
-            tool_choice=iter_choice,
             max_tokens=MAX_OUTPUT_TOKENS,
             num_retries=2,
             timeout=30,
             stream=True,
         )
+        try:
+            response = await litellm.acompletion(tool_choice=iter_choice, **call_kwargs)
+        except litellm.BadRequestError as exc:
+            # Some models (e.g. claude-sonnet-5-5) reject forced tool_choice
+            # ("any"/"tool"). Forcing is only a latency optimisation, so degrade to auto.
+            if iter_choice != "required" or "tool_choice" not in str(exc):
+                raise
+            logger.warning("Model rejected forced tool_choice; retrying with auto (and not forcing again)")
+            _forced_choice_rejected.add(settings.llm_model)
+            iter_choice = "auto"
+            response = await litellm.acompletion(tool_choice=iter_choice, **call_kwargs)
 
         # Consume the stream: yield content deltas in real-time, collect tool
         # calls incrementally so we can execute them after the stream ends.
         full_content = ""
+        finish_reason = None
         tc_parts: dict[int, dict] = {}
         async for chunk in response:
             choices = chunk.choices
             if not choices:
                 continue
+            finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
             delta = choices[0].delta
             if delta.content:
                 full_content += delta.content
@@ -522,9 +744,42 @@ async def _run_tool_loop(
 
         logger.info("Tool-loop LLM call #%d took %.3fs (choice=%s)", iteration, time.perf_counter() - t_llm, iter_choice)
 
+        if not tc_parts and not full_content:
+            # No text and no tool call: without this the turn would end silently empty
+            # (the website shows nothing; the CRM would send a blank message).
+            logger.warning(
+                "Empty model response on iteration %d (finish_reason=%s, model=%s)",
+                iteration, finish_reason, settings.llm_model,
+            )
+            if empty_retries < 1:
+                empty_retries += 1
+                continue
+            raise RuntimeError(f"empty model response (finish_reason={finish_reason})")
+
+        if (
+            not tc_parts and retract_ok and not tool_used and not price_retry_done
+            and mcp_tools and _wants_catalog(messages) and _PRICE_RE.search(full_content)
+        ):
+            # The model priced a catalog question from memory. Drop that draft and ask once more so it
+            # looks the answer up. Costs one extra call, and only when it skipped the tool.
+            price_retry_done = True
+            logger.warning("Catalog question answered with a price but no tool call; re-asking once")
+            yield ("retract", "")
+            yield "Checking live prices…"
+            messages.append({"role": "assistant", "content": full_content})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "(internal note, never mention it) That answer quoted prices without checking the live "
+                    "catalog. Call the right catalog tool first, then answer again in the same short style."
+                ),
+            })
+            continue
+
         if not tc_parts:
             logger.info("Tool loop done after %d iterations, streamed %d chars", iteration + 1, len(full_content))
             break
+        tool_used = True
 
         # Reconstruct tool call objects that support both obj.key and obj["key"]
         # (litellm internals use dict-style access on tool calls)
@@ -557,6 +812,20 @@ async def _run_tool_loop(
         has_verify = any(c.function.name == "verify_otp" for c in tool_calls)
         needs_mcp = any(c.function.name in MCP_ALLOWED_TOOLS for c in tool_calls)
 
+        async def _exec(call, mcp_session):
+            if channel == "whatsapp" and call.function.name in WHATSAPP_BLOCKED_TOOLS:
+                logger.warning("Blocked %s on WhatsApp", call.function.name)
+                return {"status": "error", "message": "Not available here. Offer the website or a representative call."}
+            if call.function.name == HANDOFF_TOOL:
+                try:
+                    reason = json.loads(call.function.arguments or "{}").get("reason")
+                except (ValueError, AttributeError):
+                    reason = None
+                if handoff_state is not None:
+                    handoff_state["reason"] = reason if reason in HANDOFF_REASONS else "other"
+                return {"status": "ok", "message": "Handoff recorded. Tell the customer a teammate will follow up here."}
+            return await _execute_tool(call, session_id, mcp_session=mcp_session)
+
         stack = None
         mcp_session = None
         if needs_mcp:
@@ -566,7 +835,7 @@ async def _run_tool_loop(
         try:
             if len(tool_calls) == 1 or has_verify:
                 for call in tool_calls:
-                    result = await _execute_tool(call, session_id, mcp_session=mcp_session)
+                    result = await _exec(call, mcp_session)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -575,7 +844,7 @@ async def _run_tool_loop(
                     })
             else:
                 results = await asyncio.gather(
-                    *(_execute_tool(c, session_id, mcp_session=mcp_session) for c in tool_calls)
+                    *(_exec(c, mcp_session) for c in tool_calls)
                 )
                 for call, result in zip(tool_calls, results):
                     messages.append({
@@ -614,7 +883,8 @@ def _error_message(exc: BaseException) -> str:
 
 
 async def stream_chat_response(
-    chat_messages: list[ChatMessage], session_id: str | None = None
+    chat_messages: list[ChatMessage], session_id: str | None = None,
+    channel: str | None = None, handoff_state: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Run the tool loop then stream the final answer as SSE frames.
 
@@ -624,12 +894,13 @@ async def stream_chat_response(
     """
     t_request = time.perf_counter()
     try:
+        await restore_session_auth(session_id)
         if session_id and await get_message_count(session_id) >= settings.max_messages_per_session:
             # No LLM call at all past the cap - cheap to check, and keeps a
             # capped-out session from still paying for a model round-trip.
             logger.info(
                 "Session %s hit the %d-message cap; declining without an LLM call",
-                session_id, settings.max_messages_per_session,
+                mask_session_id(session_id), settings.max_messages_per_session,
             )
             yield _sse({
                 "delta": (
@@ -639,20 +910,43 @@ async def stream_chat_response(
                 ),
                 "done": False,
             })
+            yield _sse({"delta": "", "done": True, "session_capped": True})
+            return
+
+        user_text = next((m.content for m in reversed(chat_messages) if m.role == "user"), "")
+        overview = price_overview_text()
+        if (channel == "whatsapp" and overview
+                and should_send_overview([m.content for m in chat_messages if m.role == "user"],
+                                         [m.content for m in chat_messages if m.role == "assistant"])
+                and not (handoff_state is not None and detect_handoff(user_text))):
+            logger.info("Sending the fixed price overview (session=%s)", mask_session_id(session_id))
+            # Whole price list asked for: send the fixed message word for word, no model call.
+            if session_id:
+                _, region = region_from_messages(chat_messages)   # keep the state tag's language for later turns
+                if region:
+                    await save_region(session_id, region)
+                await save_turn(session_id, user_text, overview)
+            yield _sse({"delta": overview, "done": False})
             yield _sse({"delta": "", "done": True})
             return
 
         t0 = time.perf_counter()
-        nudge_contact = bool(session_id) and await should_nudge_for_contact(session_id)
-        messages = await build_messages(chat_messages, session_id, nudge_contact)
+        nudge_contact = bool(session_id) and channel != "whatsapp" and await should_nudge_for_contact(session_id)
+        messages = await build_messages(
+            chat_messages, session_id, nudge_contact, channel, handoff_enabled=handoff_state is not None
+        )
         logger.info("build_messages took %.3fs (%d messages total)", time.perf_counter() - t0, len(messages))
 
         token_count = 0
         assistant_content = []
         sanitizer = StreamSanitizer()
-        async for event in _run_tool_loop(messages, session_id):
+        async for event in _run_tool_loop(messages, session_id, handoff_state, channel):
             if isinstance(event, tuple):
-                _, delta = event
+                kind, delta = event
+                if kind == "retract":   # the loop discarded its draft: forget it (history + held-back tail)
+                    assistant_content.clear()
+                    sanitizer = StreamSanitizer()
+                    continue
                 if delta:
                     token_count += 1
                     assistant_content.append(delta)  # raw text — for history/session save, never sanitized
@@ -671,7 +965,7 @@ async def stream_chat_response(
         full_assistant_msg = "".join(assistant_content)
         if session_id:
             await save_turn(session_id, user_msg, full_assistant_msg)
-            if await should_prompt_login(session_id):
+            if channel != "whatsapp" and await should_prompt_login(session_id):
                 yield _sse({"prompt_login": True, "done": False})
                 await mark_login_prompted(session_id)
 

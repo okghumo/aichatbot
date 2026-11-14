@@ -26,7 +26,9 @@ import time
 from pathlib import Path
 
 from app import session_store
+from app.session_store import mask_session_id
 from app.config import settings
+from app.handoff import HANDOFF_REASONS
 from app.mcp_client import _get_http_client
 from app.tools import get_aclient
 
@@ -62,8 +64,34 @@ SUMMARY_TOOL = {
                 "type": "boolean",
                 "description": "True if a human should follow up — unresolved question, clear booking intent, or a complaint.",
             },
+            "outcome": {
+                "type": "string",
+                "enum": ["booked", "lead_captured", "handed_off", "answered", "abandoned"],
+                "description": (
+                    "How the chat ended: booked (a booking/payment was completed), lead_captured (contact "
+                    "details were left), handed_off (passed to a human), answered (user's questions were "
+                    "answered, nothing further), abandoned (user dropped off mid-flow or unresolved)."
+                ),
+            },
+            "had_unanswered_question": {
+                "type": "boolean",
+                "description": "True if the assistant failed to answer something the user asked (said it didn't know, deflected, or gave a non-answer).",
+            },
+            "handoff_reason": {
+                "type": "string",
+                "enum": ["none", *HANDOFF_REASONS],
+                "description": "Why a human was or should have been brought in; 'none' if no handoff was needed.",
+            },
+            "tool_issues": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Short notes on any point where the assistant said a lookup, availability check, login or booking step failed or was unavailable. Empty if none.",
+            },
         },
-        "required": ["summary", "topics", "questions_asked", "sentiment", "requires_followup"],
+        "required": [
+            "summary", "topics", "questions_asked", "sentiment", "requires_followup",
+            "outcome", "had_unanswered_question", "handoff_reason", "tool_issues",
+        ],
     },
 }
 
@@ -75,7 +103,7 @@ async def _generate_summary(messages: list[dict]) -> dict:
     transcript = "\n".join(f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages)
     response = await get_aclient().messages.create(
         model=settings.web_search_model,  # cheap/fast model, same one used for search_web
-        max_tokens=700,
+        max_tokens=900,
         tools=[SUMMARY_TOOL],
         tool_choice={"type": "tool", "name": "submit_conversation_summary"},
         messages=[{
@@ -158,12 +186,12 @@ async def _send_webhook(record: dict) -> None:
             if resp.status_code not in _WEBHOOK_RETRY_STATUSES and resp.status_code < 500:
                 logger.warning(
                     "Webhook rejected summary for %s: HTTP %d (not retrying)",
-                    record.get("session_id"), resp.status_code,
+                    mask_session_id(record.get("session_id")), resp.status_code,
                 )
                 return
             logger.warning(
                 "Webhook attempt %d/%d for %s failed: HTTP %d",
-                attempt, _WEBHOOK_MAX_ATTEMPTS, record.get("session_id"), resp.status_code,
+                attempt, _WEBHOOK_MAX_ATTEMPTS, mask_session_id(record.get("session_id")), resp.status_code,
             )
             retry_after = resp.headers.get("retry-after")
             if retry_after:
@@ -177,7 +205,7 @@ async def _send_webhook(record: dict) -> None:
             # loop and be mistaken for a summarization failure.
             logger.warning(
                 "Webhook attempt %d/%d for %s failed: %s",
-                attempt, _WEBHOOK_MAX_ATTEMPTS, record.get("session_id"), e,
+                attempt, _WEBHOOK_MAX_ATTEMPTS, mask_session_id(record.get("session_id")), e,
             )
         if attempt < _WEBHOOK_MAX_ATTEMPTS:
             await asyncio.sleep(delay)
@@ -185,7 +213,7 @@ async def _send_webhook(record: dict) -> None:
     logger.error(
         "Webhook delivery permanently failed for session %s after %d attempts — "
         "still available via GET /api/admin/session-summaries",
-        record.get("session_id"), _WEBHOOK_MAX_ATTEMPTS,
+        mask_session_id(record.get("session_id")), _WEBHOOK_MAX_ATTEMPTS,
     )
 
 
@@ -232,9 +260,9 @@ async def summarize_idle_sessions() -> int:
             _append_summary(record)
             await _send_webhook(record)
             await session_store.mark_summarized(session_id)
-            logger.info("Summarized idle session %s (%d messages)", session_id, data["message_count"])
+            logger.info("Summarized idle session %s (%d messages)", mask_session_id(session_id), data["message_count"])
         except Exception:
-            logger.exception("Failed to summarize session %s — will retry next scan", session_id)
+            logger.exception("Failed to summarize session %s — will retry next scan", mask_session_id(session_id))
             # Deliberately not marked summarized on failure, so the next
             # scan pass retries it instead of silently dropping the lead.
     return len(idle_ids)

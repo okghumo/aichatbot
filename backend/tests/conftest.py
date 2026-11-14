@@ -10,7 +10,7 @@ import os
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("LLM_MODEL", "anthropic/claude-sonnet-5")
+os.environ.setdefault("LLM_MODEL", "anthropic/claude-sonnet-5-5")
 os.environ.setdefault("SYSTEM_PROMPT_FILE", "data/knowledge_base.md")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 
@@ -22,6 +22,8 @@ class FakeRedis:
 
     def __init__(self, data: dict | None = None):
         self._data = data or {}  # {key: {field: value}}
+        self._strings = {}
+        self._ttls = {}
 
     async def hgetall(self, key):
         return self._data.get(key, {})
@@ -39,7 +41,35 @@ class FakeRedis:
     async def expire(self, key, seconds):
         pass
 
+    async def set(self, key, value, nx=False, ex=None):
+        if nx and key in self._strings:
+            return None
+        self._strings[key] = value
+        self._ttls[key] = ex
+        return True
+
+    async def get(self, key):
+        return self._strings.get(key)
+
+    async def ttl(self, key):
+        return self._ttls.get(key) or -1
+
+    async def delete(self, key):
+        self._strings.pop(key, None)
+
     async def scan_iter(self, match="*"):
         for key in list(self._data.keys()):
             if fnmatch.fnmatch(key, match):
                 yield key
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_forced_choice_memory():
+    """llm remembers which models rejected a forced tool_choice for the life of the process; tests must not leak that."""
+    from app import llm
+    llm._forced_choice_rejected.clear()
+    yield
+    llm._forced_choice_rejected.clear()

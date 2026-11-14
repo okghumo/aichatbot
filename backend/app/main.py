@@ -2,6 +2,7 @@
 logic lives in app.llm / app.tools.
 """
 import asyncio
+import hmac
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -11,15 +12,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
+from app.crm_chat import router as crm_router
+from app.followup import router as followup_router
 from app.dashboard import get_summary, idle_scan_loop, list_summaries
 from app.llm import stream_chat_response
 from app.mcp_client import close_http_client
-from app.rate_limit import RateLimitMiddleware
+from app.rate_limit import RateLimitMiddleware, has_valid_chat_key
 from app.schemas import ChatRequest, UserInfoRequest, AttachmentUploadResponse
-from app.session_store import init_redis, close_redis, save_user_info
+from app.session_store import init_redis, close_redis, save_user_info, mask_session_id
 from app.attachments import store_attachment, AttachmentError
 from fastapi import UploadFile, File
 
+class _OneLineRecord(logging.LogRecord):
+    """Escape CR/LF in every log message so client-supplied text can't forge extra log lines
+    (OWASP log injection). Tracebacks are formatted separately and unaffected."""
+
+    def getMessage(self) -> str:
+        return super().getMessage().replace("\r", "\\r").replace("\n", "\\n")
+
+
+logging.setLogRecordFactory(_OneLineRecord)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -45,8 +57,18 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down")
 
 
-app = FastAPI(title="Chatbot Backend", lifespan=lifespan)
+# With a CHAT_API_KEY the API is meant for a trusted gateway: don't publish its schema.
+_docs_off = bool(settings.chat_api_key) and not settings.docs_enabled
+app = FastAPI(
+    title="Chatbot Backend",
+    lifespan=lifespan,
+    docs_url=None if _docs_off else "/docs",
+    redoc_url=None if _docs_off else "/redoc",
+    openapi_url=None if _docs_off else "/openapi.json",
+)
 
+app.include_router(crm_router)
+app.include_router(followup_router)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -67,6 +89,9 @@ def health() -> dict:
 async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse:
     """Stream a chat completion as Server-Sent Events.
 
+    Open to the public website: the browser cannot hold a secret. CHAT_API_KEY only
+    guards /api/v2/* (the CRM); here a valid key merely unlocks the WhatsApp channel.
+
     session_id resolution: an explicit value in the request body wins (a
     frontend that manages its own), else an existing session_id cookie,
     else a freshly generated one — set as a cookie on the response so a
@@ -77,10 +102,14 @@ async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse
     logger.info(
         "POST /api/chat — %d messages, session=%s",
         len(request.messages),
-        session_id,
+        mask_session_id(session_id),
     )
     response = StreamingResponse(
-        stream_chat_response(request.messages, session_id),
+        # The WhatsApp persona/format is for the trusted CRM only: an anonymous web caller cannot opt in.
+        stream_chat_response(
+            request.messages, session_id,
+            channel=request.channel if has_valid_chat_key(http_request) else None,
+        ),
         media_type="text/event-stream",
     )
     # ponytail: secure mirrors the scheme uvicorn itself sees — if this ever
@@ -98,12 +127,12 @@ async def chat(request: ChatRequest, http_request: Request) -> StreamingResponse
     return response
 
 @app.post("/api/session/user-info")
-async def store_user_info(request: UserInfoRequest) -> dict:
+async def store_user_info(request: UserInfoRequest, http_request: Request) -> dict:
     """Store captured user contact information in their Redis session."""
     if not request.session_id:
         return {"status": "error", "message": "No session ID provided"}
         
-    logger.info("POST /api/session/user-info — session=%s", request.session_id)
+    logger.info("POST /api/session/user-info — session=%s", mask_session_id(request.session_id))
     await save_user_info(
         request.session_id,
         request.user_info.name,
@@ -118,7 +147,8 @@ def _check_dashboard_auth(http_request: Request) -> None:
     tells you "this feature is off", not "your token is wrong"."""
     if not settings.dashboard_api_key:
         raise HTTPException(503, "Dashboard API not configured (set DASHBOARD_API_KEY)")
-    if http_request.headers.get("authorization") != f"Bearer {settings.dashboard_api_key}":
+    supplied = http_request.headers.get("authorization", "")
+    if not hmac.compare_digest(supplied.encode(), f"Bearer {settings.dashboard_api_key}".encode()):
         raise HTTPException(401, "Unauthorized")
 
 
@@ -136,14 +166,14 @@ def get_session_summaries(http_request: Request, since: str | None = None) -> di
 @app.get("/api/admin/session-summaries/{session_id}")
 def get_session_summary(session_id: str, http_request: Request) -> dict:
     _check_dashboard_auth(http_request)
-    logger.info("GET /api/admin/session-summaries/%s", session_id)
+    logger.info("GET /api/admin/session-summaries/%s", mask_session_id(session_id))
     record = get_summary(session_id)
     if record is None:
         raise HTTPException(404, "No summary for this session (not yet idle-summarized, or unknown id)")
     return record
 
 @app.post("/api/chat/attachments", response_model=AttachmentUploadResponse)
-async def upload_attachment(file: UploadFile = File(...)) -> AttachmentUploadResponse:
+async def upload_attachment(http_request: Request, file: UploadFile = File(...)) -> AttachmentUploadResponse:
     """Validate, scan, and store one attachment. Returns an id to reference
     from a subsequent /api/chat call — see schemas.ChatMessage.attachment_ids.
 

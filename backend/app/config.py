@@ -3,7 +3,7 @@
 Key settings:
     ANTHROPIC_API_KEY      — required, used by litellm (Claude) and web search
     OPENAI_API_KEY         — required for RAG embeddings (text-embedding-3-small)
-    LLM_MODEL              — litellm model string, default anthropic/claude-sonnet-5
+    LLM_MODEL              — litellm model string, default anthropic/claude-sonnet-5-5
     WEB_SEARCH_MODEL       — Anthropic model for web search, default claude-haiku-4-5
     SYSTEM_PROMPT_FILE     — path to base system-prompt markdown file
     CORS_ORIGINS           — comma-separated list of allowed CORS origins
@@ -16,8 +16,20 @@ Key settings:
     LOGIN_PROMPT_AFTER     — user messages before showing the login-details prompt, default 3
     MAX_MESSAGES_PER_SESSION — user messages allowed per chat session before a friendly
                              "start a new chat" reply replaces the LLM call, default 15
+    CHAT_API_KEY           — optional; when set, POST /api/chat and /api/session/user-info need
+                             `Authorization: Bearer <key>`, and valid-key calls skip the rate limit
+    CHAT_LIMIT_PER_MINUTE  — per-IP /api/chat limit for callers without a valid key, default 20
+    CHAT_KEY_LIMIT_PER_MINUTE — combined limit for all requests with a valid key, default 120 (0 = off)
+    TRUSTED_PROXY_HOPS     — reverse proxies appending to X-Forwarded-For, default 1 (client IP is
+                             taken that many entries from the right; 0 = ignore the header)
+    WHATSAPP_PERSONA_NAME  — first name of the WhatsApp-only female persona (channel="whatsapp"), default Prachi
+    LOG_HASH_KEY           — secret for hashing session ids in logs (random per run if unset; set it to
+                             follow one chat across restarts/workers)
+    DOCS_ENABLED           — true to keep /docs and /openapi.json when CHAT_API_KEY is set, default false
     DASHBOARD_API_KEY      — bearer token guarding GET /api/admin/session-summaries (optional,
                              endpoints return 503 if unset — see app/dashboard.py)
+    FOLLOWUP_SCHEDULE_MINUTES — comma list: minutes of silence after the bot's last message before
+                             follow-up 1, 2, 3...; default 15,60,360,1440 (see app/followup.py)
     IDLE_SUMMARY_MINUTES   — inactivity before a session is summarized for the dashboard, default 15
     SUMMARY_WEBHOOK_URL    — optional; POSTed with every newly generated session summary
                              (see app/dashboard.py _send_webhook). Blank = feature off.
@@ -39,7 +51,7 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str
     openai_api_key: str = ""
-    llm_model: str = "anthropic/claude-sonnet-5"
+    llm_model: str = "anthropic/claude-sonnet-5-5"
     web_search_model: str = "claude-haiku-4-5"
     system_prompt_file: str = "data/knowledge_base.md"
     cors_origins: str = "http://localhost:5173"
@@ -56,10 +68,30 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 7200          # 2 hours
     login_prompt_after: int = 3              # prompt after 3 user messages
     max_messages_per_session: int = 15       # past this, a friendly "start a new chat" reply
+    # Machine-to-machine callers (e.g. the WhatsApp CRM). Blank = /api/chat
+    # stays open exactly as before (the browser frontend can't hold a secret).
+    # Set it on a dedicated deployment to require `Authorization: Bearer <key>`;
+    # requests carrying a valid key also skip the per-IP rate limit.
+    chat_api_key: str = ""
+    chat_limit_per_minute: int = 20          # per-IP, requests without a valid key
+    # Ceiling on ALL requests carrying a valid key combined, so a leaked key can't
+    # run up an unbounded LLM bill. 0 = off. Generous: the CRM sends ~1 call per customer message.
+    chat_key_limit_per_minute: int = 120
+    # How many reverse proxies sit in front of the app and append to X-Forwarded-For.
+    # The client IP is the entry that many places from the RIGHT (the left side is
+    # caller-controlled and spoofable). 0 = ignore the header, use the socket address.
+    trusted_proxy_hops: int = 1
+    # The WhatsApp-only persona's name (data/whatsapp_persona.md). The website chat never uses it.
+    whatsapp_persona_name: str = "Prachi"
+    # Secret key for the log-safe session id hash (app/session_store.mask_session_id). Empty = random per run.
+    log_hash_key: str = ""
+    # /docs, /redoc and /openapi.json are hidden when CHAT_API_KEY is set, unless this is true.
+    docs_enabled: bool = False
     # Employee-dashboard session summaries — see app/dashboard.py. Idle-scan
     # runs regardless of REDIS_URL/DASHBOARD_API_KEY; it just no-ops without
     # them (nothing to scan / no way to authenticate reads).
     dashboard_api_key: str = ""              # blank = /api/admin/* returns 503
+    followup_schedule_minutes: str = "15,60,360,1440"   # when the CRM should ask for each follow-up
     idle_summary_minutes: int = 15           # inactivity before summarizing a session
     idle_scan_interval_seconds: int = 300    # how often to check for idle sessions
     # Push delivery of generated summaries to an external system — optional,

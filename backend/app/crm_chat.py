@@ -1,0 +1,214 @@
+"""POST /api/v2/chat — the CRM-facing chat endpoint.
+
+Same brain as /api/chat (app.llm.stream_chat_response), different contract:
+always authenticated with CHAT_API_KEY, one JSON body instead of an SSE
+stream, machine-readable handoff / session-cap flags, and request_id replay
+so a CRM retry never re-runs tools. /api/chat is untouched by any of this.
+"""
+import json
+import logging
+import re
+import uuid
+
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from app import session_store
+from app.session_store import mask_session_id
+from app.config import settings
+from app.emoji_limit import limit_emojis
+from app.handoff import detect_handoff, strip_ticket_numbers
+from app.llm import stream_chat_response
+from app.price_overview import price_overview_text
+from app.rate_limit import has_valid_chat_key
+from app.schemas import ChatRequest
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+IDEMPOTENCY_TTL_SECONDS = 600
+IN_FLIGHT_TTL_SECONDS = 120   # > the CRM's 60s timeout, so a crashed request frees its key
+HANDOFF_FALLBACK_REPLY = "I'm connecting you with our team. Someone will follow up with you here shortly."
+
+
+# WhatsApp shows only the selling price: a struck-through original price (~₹3,000~ or the KB's ~~₹3,000~~)
+# is removed. Deterministic backstop so a prompt slip never shows the old price. Other struck text
+# keeps WhatsApp's single tilde.
+_STRUCK_PRICE_RE = re.compile(r"~{1,2}[^~\n]*\d[^~\n]*~{1,2}[ \t]*")
+_DOUBLE_TILDE_RE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+
+
+def _to_whatsapp_strike(text: str) -> str:
+    return _DOUBLE_TILDE_RE.sub(r"~\1~", _STRUCK_PRICE_RE.sub("", text))
+
+
+MAX_BUBBLES = 4
+WHATSAPP_TEXT_LIMIT = 4000   # WhatsApp's hard limit is 4096; leave a little room
+
+
+def _split_messages(reply: str) -> list[str]:
+    """Split a reply into WhatsApp-sized bubbles: one per paragraph (blank-line separated),
+    at most MAX_BUBBLES (the overflow is merged into the last one), none over the text limit.
+    A bullet list with single newlines stays in one bubble."""
+    parts = [p.strip() for p in re.split(r"\n\s*\n", reply) if p.strip()]
+    if len(parts) > MAX_BUBBLES:
+        parts = parts[: MAX_BUBBLES - 1] + ["\n\n".join(parts[MAX_BUBBLES - 1:])]
+    bubbles: list[str] = []
+    for part in parts:
+        while len(part) > WHATSAPP_TEXT_LIMIT:
+            cut = part.rfind("\n", 0, WHATSAPP_TEXT_LIMIT)
+            cut = cut if cut > 0 else WHATSAPP_TEXT_LIMIT
+            bubbles.append(part[:cut].strip())
+            part = part[cut:].strip()
+        bubbles.append(part)
+    return bubbles
+
+
+class ChatV2Response(BaseModel):
+    session_id: str
+    reply: str
+    messages: list[str] = []   # same text as `reply`, split into short bubbles to send one by one
+    handoff: bool = False
+    handoff_reason: str | None = None
+    session_capped: bool = False
+    error: str | None = None
+
+
+async def _claim(key: str | None) -> tuple[str, str | None]:
+    """('new'|'inflight'|'replay'|'off', stored_json). 'off' = no Redis / no
+    request_id / Redis error: process normally without idempotency, never fail."""
+    client = session_store.redis_client
+    if not client or not key:
+        return "off", None
+    try:
+        if await client.set(key, "pending", nx=True, ex=IN_FLIGHT_TTL_SECONDS):
+            return "new", None
+        stored = await client.get(key)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("Idempotency check failed; processing without it")
+        return "off", None
+    if stored is None:
+        return "off", None
+    return ("inflight", None) if stored == "pending" else ("replay", stored)
+
+
+async def _store(key: str, result: ChatV2Response) -> None:
+    """Keep successful results for replay; drop the pending marker on errors so a retry can run."""
+    client = session_store.redis_client
+    try:
+        if result.error:
+            await client.delete(key)
+        else:
+            await client.set(key, result.model_dump_json(), ex=IDEMPOTENCY_TTL_SECONDS)
+    except Exception:  # pylint: disable=broad-except
+        logger.exception("Could not store idempotency result for %s", mask_session_id(key))
+
+
+def _require_key(http_request: Request) -> None:
+    if not settings.chat_api_key:
+        raise HTTPException(503, "CRM chat API not configured (set CHAT_API_KEY)")
+    if not has_valid_chat_key(http_request):
+        raise HTTPException(401, "Unauthorized")
+
+
+def _make_result(request: ChatRequest, session_id: str, parts: list[str], error: str | None,
+                 capped: bool, handoff_state: dict) -> ChatV2Response:
+    """Turn what stream_chat_response produced into the v2 response (shared by JSON and stream)."""
+    reply = strip_ticket_numbers("".join(parts))
+    fixed = bool(reply) and reply == price_overview_text()   # the fixed price message keeps its ~struck~ prices and stays one bubble
+    if (request.channel or "whatsapp") == "whatsapp" and not fixed:
+        reply = _to_whatsapp_strike(reply)
+        reply = limit_emojis(reply, [m.content for m in request.messages if m.role == "assistant"])
+    last_user = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
+    reason = None if capped else handoff_state.get("reason") or detect_handoff(last_user)
+    if reason and not reply:
+        reply = HANDOFF_FALLBACK_REPLY
+    if not reply and not error:
+        error = "empty_reply"   # never hand the CRM a blank message with no error: it would send it
+    return ChatV2Response(
+        session_id=session_id, reply=reply, messages=[reply] if fixed else _split_messages(reply),
+        handoff=bool(reason), handoff_reason=reason, session_capped=capped, error=error,
+    )
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+@router.post("/api/v2/chat/stream")
+async def chat_v2_stream(request: ChatRequest, http_request: Request) -> StreamingResponse:
+    """Same as POST /api/v2/chat but streamed (SSE) so a gateway can show progress sooner.
+
+    Frames: {"status": "..."} while tools run, {"delta": "..."} text chunks (raw, as the model
+    writes them), and ONE final {"done": true, ...ChatV2Response fields}, which is the canonical
+    answer (WhatsApp strikethrough fixed, `messages` split, handoff flags). No idempotency here:
+    use the JSON endpoint when you need replay protection.
+    """
+    _require_key(http_request)
+    session_id = request.session_id or str(uuid.uuid4())
+    logger.info("POST /api/v2/chat/stream — %d messages, session=%s", len(request.messages), mask_session_id(session_id))
+
+    async def frames():
+        handoff_state: dict = {}
+        parts: list[str] = []
+        error = None
+        capped = False
+        async for frame in stream_chat_response(
+            request.messages, session_id, channel=request.channel or "whatsapp", handoff_state=handoff_state
+        ):
+            payload = json.loads(frame.removeprefix("data: ").strip())
+            if payload.get("status"):
+                parts.clear()   # a status frame means a tool round started: text so far was a "let me check" preamble
+            if payload.get("done"):
+                error = payload.get("error") or error
+                capped = capped or bool(payload.get("session_capped"))
+                continue
+            if payload.get("delta"):
+                parts.append(payload["delta"])
+                yield _sse({"delta": payload["delta"], "done": False})
+            elif payload.get("status"):
+                yield _sse({"status": payload["status"], "done": False})
+        result = _make_result(request, session_id, parts, error, capped, handoff_state)
+        yield _sse({"done": True, **result.model_dump()})
+
+    return StreamingResponse(frames(), media_type="text/event-stream")
+
+
+@router.post("/api/v2/chat", response_model=ChatV2Response)
+async def chat_v2(request: ChatRequest, http_request: Request, response: Response) -> ChatV2Response:
+    _require_key(http_request)
+
+    session_id = request.session_id or str(uuid.uuid4())
+    key = f"idem:v2:{session_id}:{request.request_id}" if request.request_id else None
+    state, stored = await _claim(key)
+    if state == "inflight":
+        raise HTTPException(409, "A request with this request_id is still being processed; retry shortly")
+    if state == "replay":
+        response.headers["Idempotency-Replayed"] = "true"
+        return ChatV2Response.model_validate_json(stored)
+
+    logger.info("POST /api/v2/chat — %d messages, session=%s", len(request.messages), mask_session_id(session_id))
+    handoff_state: dict = {}
+    parts: list[str] = []
+    error = None
+    capped = False
+    try:
+        async for frame in stream_chat_response(
+            request.messages, session_id, channel=request.channel or "whatsapp", handoff_state=handoff_state
+        ):
+            payload = json.loads(frame.removeprefix("data: ").strip())
+            if payload.get("status"):
+                parts.clear()   # drop the model's pre-tool preamble: the customer should get only the final answer
+            parts.append(payload.get("delta") or "")
+            error = payload.get("error") or error
+            capped = capped or bool(payload.get("session_capped"))
+
+        result = _make_result(request, session_id, parts, error, capped, handoff_state)
+    except BaseException:
+        if state == "new":
+            await _store(key, ChatV2Response(session_id=session_id, reply="", error="aborted"))
+        raise
+    if state == "new":
+        await _store(key, result)
+    return result

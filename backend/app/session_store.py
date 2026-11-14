@@ -1,5 +1,8 @@
+import hashlib
+import hmac
 import json
 import logging
+import secrets
 import time
 from typing import Any
 
@@ -8,6 +11,22 @@ from redis.asyncio import Redis, from_url
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Used when LOG_HASH_KEY is unset. ponytail: ids then correlate only within one process run; set
+# LOG_HASH_KEY to keep them stable across restarts and workers.
+_FALLBACK_LOG_KEY = secrets.token_bytes(32)
+
+
+def mask_session_id(session_id: str | None) -> str:
+    """Log-safe session id: a keyed hash (HMAC-SHA256, 12 hex chars). WhatsApp ids are wa-<phone>-<n>, so
+    nothing of the phone number is kept, and the key stops anyone reversing it by trying every number
+    (a plain hash would fall to that). The same id always maps to the same value, so one chat can still
+    be followed through the logs. Redis keys keep the real id; logs and alert emails use this."""
+    if not session_id:
+        return ""
+    key = settings.log_hash_key.encode() or _FALLBACK_LOG_KEY
+    return "sid-" + hmac.new(key, session_id.encode(), hashlib.sha256).hexdigest()[:12]
+
 
 # Global redis connection pool
 redis_client: Redis | None = None
@@ -71,12 +90,12 @@ async def save_turn(session_id: str, user_msg: str, assistant_msg: str) -> None:
         # Write to redis and set TTL
         await redis_client.hset(key, mapping=update)
         await redis_client.expire(key, settings.session_ttl_seconds)
-        logger.info(f"Saved turn for session {session_id} (count: {count})")
+        logger.info(f"Saved turn for session {mask_session_id(session_id)} (count: {count})")
     except Exception as e:
-        logger.error(f"Failed to save turn to Redis for session {session_id}: {e}")
+        logger.error(f"Failed to save turn to Redis for session {mask_session_id(session_id)}: {e}")
         from app.notifier import send_critical_alert
         import asyncio
-        asyncio.create_task(send_critical_alert("redis_down", str(e), f"Failed to save turn for session {session_id}"))
+        asyncio.create_task(send_critical_alert("redis_down", str(e), f"Failed to save turn for session {mask_session_id(session_id)}"))
 
 async def get_message_count(session_id: str) -> int:
     """Get the number of user messages in this session."""
@@ -102,7 +121,7 @@ async def _prompt_eligible(session_id: str, min_count: int) -> bool:
         has_info = "user_info" in session_data
         return count >= min_count and not prompted and not has_info
     except Exception as e:
-        logger.error(f"Failed to check prompt eligibility for session {session_id}: {e}")
+        logger.error(f"Failed to check prompt eligibility for session {mask_session_id(session_id)}: {e}")
         return False
 
 
@@ -145,7 +164,7 @@ async def save_user_info(session_id: str, name: str, phone: str, email: str) -> 
         user_info = json.dumps({"name": name, "phone": phone, "email": email})
         await redis_client.hset(key, "user_info", user_info)
         await redis_client.expire(key, settings.session_ttl_seconds)
-        logger.info(f"Saved user info for session {session_id}")
+        logger.info(f"Saved user info for session {mask_session_id(session_id)}")
     except Exception as e:
         logger.error(f"Failed to save user info: {e}")
 
@@ -163,9 +182,31 @@ async def save_verified_phone(session_id: str, phone: str) -> None:
         key = f"session:{session_id}"
         await redis_client.hset(key, "verified_phone", phone)
         await redis_client.expire(key, settings.session_ttl_seconds)
-        logger.info(f"Saved verified phone for session {session_id}")
+        logger.info(f"Saved verified phone for session {mask_session_id(session_id)}")
     except Exception as e:
         logger.error(f"Failed to save verified phone: {e}")
+
+
+async def save_region(session_id: str, region: str) -> None:
+    """Remember the first-message state tag so the reply language survives a trimmed history."""
+    if not redis_client or not session_id:
+        return
+    try:
+        key = f"session:{session_id}"
+        await redis_client.hset(key, "region", region)
+        await redis_client.expire(key, settings.session_ttl_seconds)
+    except Exception as e:
+        logger.error(f"Failed to save region: {e}")
+
+
+async def get_region(session_id: str) -> str | None:
+    if not redis_client or not session_id:
+        return None
+    try:
+        return await redis_client.hget(f"session:{session_id}", "region")
+    except Exception as e:
+        logger.error(f"Failed to read region: {e}")
+        return None
 
 
 async def find_idle_sessions(idle_seconds: int) -> list[str]:
@@ -215,7 +256,7 @@ async def get_session_data(session_id: str) -> dict[str, Any]:
             "last_activity": float(data.get("last_activity", 0) or 0),
         }
     except Exception as e:
-        logger.error(f"Failed to load session data for {session_id}: {e}")
+        logger.error(f"Failed to load session data for {mask_session_id(session_id)}: {e}")
         return {}
 
 
@@ -225,6 +266,6 @@ async def mark_summarized(session_id: str) -> None:
         return
     try:
         await redis_client.hset(f"session:{session_id}", "summarized", "true")
-        logger.info(f"Marked session {session_id} as summarized")
+        logger.info(f"Marked session {mask_session_id(session_id)} as summarized")
     except Exception as e:
-        logger.error(f"Failed to mark session {session_id} summarized: {e}")
+        logger.error(f"Failed to mark session {mask_session_id(session_id)} summarized: {e}")
