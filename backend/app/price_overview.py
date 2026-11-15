@@ -100,10 +100,14 @@ def offer_prompt() -> str:
     offers = _active_offers(datetime.now(ZoneInfo("Asia/Kolkata")).date())
     if not offers:
         return ""
-    return ("## Live offer (overrides catalog/KB prices)\n"
-            "A limited-time offer is running. When the customer asks the price of an activity listed below, quote the "
-            "OFFER price and include its free extras. Never quote the old price for these activities. Activities not "
-            "listed here keep their normal price.\n\n" + "\n\n".join(o["text"].strip() for o in offers))
+    return ("## Live offer (a combo running on top of the normal price)\n"
+            "A limited-time combo offer is running on the activities listed below. When the customer asks about "
+            "one of them, answer in two parts: (1) first give that activity's own price from the live catalog, "
+            "plainly, as they asked; (2) then, as a separate short paragraph, say we are currently running a combo "
+            "on it and give the offer price and what is free (rafting, video, transport) exactly as listed below. "
+            "Present the offer as a nice extra they can pick, not as the only option, and do not push it. If they "
+            "only want the activity itself, that is fine. If the catalog cannot be checked, give the offer line "
+            "alone. Activities not listed here have no offer: quote only their normal price.\n\n" + "\n\n".join(o["text"].strip() for o in offers))
 
 
 def price_overview_text() -> str:

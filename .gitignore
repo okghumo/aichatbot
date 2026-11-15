@@ -45,3 +45,16 @@ whatsapp*chat*dataset*
 # Customer data written at runtime (phone numbers, chat summaries). Never commit.
 backend/data/leads.json
 backend/data/session_summaries.json
+
+# Spreadsheets & tabular data
+*.xlsx
+*.xls
+*.csv
+*.tsv
+
+# Scraped data & adventure sports scraping workspace
+data_scraping_india_adventure_sports/
+
+# Local planning/research docs, not for commit
+DATA_COLLECTION_PLAN.md
+backend/data/chat_playbook.md
