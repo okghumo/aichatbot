@@ -29,7 +29,7 @@ router = APIRouter()
 
 IDEMPOTENCY_TTL_SECONDS = 600
 IN_FLIGHT_TTL_SECONDS = 120   # > the CRM's 60s timeout, so a crashed request frees its key
-HANDOFF_FALLBACK_REPLY = "I'm connecting you with our team. Someone will follow up with you here shortly."
+HANDOFF_FALLBACK_REPLY = "For this, could you please call our booking desk team on +91 85118 38237? They will be happy to help you."
 
 
 # WhatsApp shows only the selling price: a struck-through original price (~₹3,000~ or the KB's ~~₹3,000~~)

@@ -10,6 +10,9 @@ import re
 
 HANDOFF_TOOL = "request_human_handoff"
 
+# Customers are pointed here instead of being told a teammate will contact them.
+BOOKING_DESK_PHONE = "+91 85118 38237"
+
 # Given ONLY to a customer who asks for a discount because they are Gujarati. The code is in the prompt
 # only for such a chat (see asks_gujarati_discount), so the model cannot offer it upfront.
 GUJARATI_COUPON = "GUJARATI5"
@@ -32,8 +35,8 @@ HANDOFF_SCHEMA = {
         "description": (
             "Pass this conversation to a human salesperson. Call it when the customer asks for a "
             "person, you cannot answer, they complain, report a payment problem, want to change "
-            "or cancel an existing booking, or ask for an extra discount or a lower price (reason discount_request). After calling it, reply with ONE short friendly sentence "
-            "saying the team will follow up here. Never mention a ticket or reference number."
+            "or cancel an existing booking, or ask for an extra discount or a lower price (reason discount_request). After calling it, reply with ONE short, polite sentence "
+            "asking them to please call the booking desk on +91 85118 38237 for more details. Never mention a ticket or reference number."
         ),
         "parameters": {
             "type": "object",
@@ -53,19 +56,25 @@ HANDOFF_PROMPT = (
     "escalate_and_capture_lead or to give a LEAD-XXXXX ticket ID (groups of 5+, custom packages, a failed "
     "booking, a callback), call request_human_handoff instead and never mention or invent a ticket, "
     "reference or LEAD- number, even if earlier messages in the chat contain one.\n"
+    "### Contacting the team (OVERRIDES every line that says a teammate or the team will message, contact or call them)\n"
+    "Whenever a customer needs a person, never say a teammate, the team or a representative will contact, call or message "
+    "them. Instead, in their language and in very polite words, ask them to please call the booking desk on "
+    "+91 85118 38237 for more details, e.g. \"For this, could you please call our booking desk on +91 85118 38237? "
+    "They will be happy to help you with all the details.\" Write the number exactly like that, once, in the same message. "
+    "Still call request_human_handoff as instructed. This does not apply to the photos-and-videos rule below.\n"
     "### Discount requests\n"
     "When the customer asks or pushes for an extra discount, a special or lower price, a coupon or a "
     "better deal (including 'Gujarati/student/group discount' or 'last price'): never say no, never say "
     "you cannot or do not give discounts, and never invent, offer or promise one (the only exception is a "
     "coupon given to you in a separate Gujarati instruction). Reply in their language "
-    "in at most two short sentences: the prices shown are already discounted, and you will pass this to a "
-    "teammate who can decide on it. Then call request_human_handoff with reason discount_request in the "
+    "in at most two short sentences: the prices shown are already discounted, and for anything extra they can "
+    "please call the booking desk on +91 85118 38237. Then call request_human_handoff with reason discount_request in the "
     "same turn. Only for a real request to pay less: a question about the listed or discounted price is "
     "answered normally, with no handoff.\n"
     "### Groups and custom requests\n"
     "A group of 5 or more people, a corporate or college outing, or a custom package or itinerary is "
-    "handled by the team. Reply in their language in one or two short sentences: say the team will check "
-    "the date and the group rate and message them here (no ticket, no reference number). Then call "
+    "handled by the team. Reply in their language in one or two short sentences: politely ask them to call "
+    "the booking desk on +91 85118 38237 to check the date and the group rate (no ticket, no reference number). Then call "
     "request_human_handoff with reason group_booking in the same turn.\n"
     "### Photos and videos\n"
     "When the customer asks you to send or show photos, pictures, videos, clips or reels: never say you "

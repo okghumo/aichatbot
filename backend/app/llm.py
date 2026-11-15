@@ -35,7 +35,7 @@ from app.schemas import ChatMessage
 from app.attachments import resolve_attachment
 from app.flow_guard import is_hard_protected, is_protected_turn
 from app.handoff import (
-    GUJARATI_DISCOUNT_PROMPT, HANDOFF_PROMPT, HANDOFF_SCHEMA, HANDOFF_TOOL, HANDOFF_REASONS, asks_gujarati_discount, detect_handoff,
+    BOOKING_DESK_PHONE, GUJARATI_DISCOUNT_PROMPT, HANDOFF_PROMPT, HANDOFF_SCHEMA, HANDOFF_TOOL, HANDOFF_REASONS, asks_gujarati_discount, detect_handoff,
 )
 from app.token_store import (
     AUTH_TOOLS, extract_token, get_token, set_token,
@@ -127,7 +127,7 @@ def _whatsapp_style() -> str:
             for name in ("whatsapp_persona.md", "whatsapp_style.md")
             if (folder / name).exists()
         ]
-        _whatsapp_style_cache = "\n\n".join(parts).replace("{name}", settings.whatsapp_persona_name)
+        _whatsapp_style_cache = "\n\n".join(parts).replace("{name}", settings.whatsapp_persona_name).replace("{desk_phone}", BOOKING_DESK_PHONE)
     return _whatsapp_style_cache
 
 
@@ -825,7 +825,7 @@ async def _run_tool_loop(
                     reason = None
                 if handoff_state is not None:
                     handoff_state["reason"] = reason if reason in HANDOFF_REASONS else "other"
-                return {"status": "ok", "message": "Handoff recorded. Tell the customer a teammate will follow up here."}
+                return {"status": "ok", "message": "Handoff recorded. Politely ask the customer to please call the booking desk on +91 85118 38237 for more details."}
             return await _execute_tool(call, session_id, mcp_session=mcp_session)
 
         stack = None
