@@ -100,6 +100,7 @@ def offer_prompt() -> str:
     offers = _active_offers(datetime.now(ZoneInfo("Asia/Kolkata")).date())
     if not offers:
         return ""
+    end = min(date.fromisoformat(o["expires"]) for o in offers).strftime("%d %b %Y")
     return ("## Live offer (a combo running on top of the normal price)\n"
             "A limited-time combo offer is running on the activities listed below. When the customer asks about "
             "one of them, answer in two parts: (1) first give that activity's own price from the live catalog, "
@@ -107,7 +108,14 @@ def offer_prompt() -> str:
             "on it and give the offer price and what is free (rafting, video, transport) exactly as listed below. "
             "Present the offer as a nice extra they can pick, not as the only option, and do not push it. If they "
             "only want the activity itself, that is fine. If the catalog cannot be checked, give the offer line "
-            "alone. Activities not listed here have no offer: quote only their normal price.\n\n" + "\n\n".join(o["text"].strip() for o in offers))
+            "alone. Activities not listed here have no offer: quote only their normal price.\n"
+            f"**Offers after {end}:** if the customer asks about an offer, discount or price for dates after {end}, "
+            "or about a later month's offer (e.g. 'January offer?'), never refuse and never invent one. Reply in "
+            f"their language, in very polite words and at most two short sentences: we have a fixed offer until {end}, "
+            "and after that we can try to make a special offer for them if possible; you will check with the team and "
+            "let them know. Say this in the first person, one time. Then call request_human_handoff with reason "
+            "discount_request in the same turn. This is the one case where you may say you will check with the team.\n\n"
+            + "\n\n".join(o["text"].strip() for o in offers))
 
 
 def price_overview_text() -> str:

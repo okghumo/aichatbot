@@ -125,5 +125,6 @@ def test_live_offer_replaces_the_standard_message_and_expires_after_its_last_day
 
 def test_offer_prompt_lists_the_offer_only_while_live(monkeypatch):
     assert "117M Bungee Jump: Rs. 5,000" in po.offer_prompt()
+    assert "Offers after 31 Dec 2026" in po.offer_prompt() and "special offer" in po.offer_prompt()
     _no_offers(monkeypatch)
     assert po.offer_prompt() == ""

@@ -31,5 +31,6 @@ def test_prompt_has_the_media_rule_only_where_handoff_is_enabled():
         built = asyncio.run(llm_module.build_messages(msgs, "s-3", channel="whatsapp", handoff_enabled=handoff))
         return json.dumps(built[0]["content"])
     assert "never say you cannot send them" in system(True)
-    assert "you will share the photos after some time" in system(True)
+    assert "never promise to send photos or videos later" in system(True)
+    assert "after some time (say" not in system(True)
     assert "never say you cannot send them" not in system(False)

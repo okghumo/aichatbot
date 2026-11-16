@@ -560,3 +560,11 @@ def test_two_empty_model_answers_raise_instead_of_ending_silently(monkeypatch):
 def test_howto_book_question_does_not_force_a_catalog_call():
     assert not _wants_catalog([{"role": "user", "content": "How do I book?"}])
     assert _wants_catalog([{"role": "user", "content": "book bungee for saturday"}])
+
+
+def test_multi_activity_asks_are_resolved_per_activity_across_providers():
+    """Regression: 'rooftop + giant swing' after a Maa Ganga chat must not be answered by searching Maa Ganga for
+    giant swing. The rule is generic (no operator or activity names), so it covers any pair."""
+    p = llm_module.LIVE_CATALOG_TOOLS_PROMPT
+    assert "EACH named activity as its own lookup" in p and "ALL providers" in p
+    assert "never tell the customer a provider 'does not have'" in p
