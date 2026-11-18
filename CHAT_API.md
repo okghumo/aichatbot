@@ -553,7 +553,8 @@ never in a browser or mobile app.
   "handoff": false,
   "handoff_reason": null,
   "session_capped": false,
-  "error": null
+  "error": null,
+  "response_id": "resp_8f2c4a1b9d3e7f6a5b4c3d2e"
 }
 ```
 
@@ -566,6 +567,7 @@ never in a browser or mobile app.
 | `handoff_reason` | string \| null | `customer_requested_human`, `cannot_answer`, `complaint`, `payment_issue`, `booking_change`, `discount_request`, `group_booking` or `other`. Advisory only: it is set by the model or by a keyword check on the customer's last message. |
 | `session_capped` | bool | `true`: the session hit its message cap. **Do not show `reply`.** Start a new `session_id` and resend the same customer message. |
 | `error` | string \| null | Non-null means the request failed (LLM overloaded, rate-limited, internal error). **Never forward this text to the customer.** |
+| `response_id` | string \| null | Bucky's own id for this reply (`resp_` + 24 hex), `null` when `reply` is empty. **Store it on the message** and send it back as `flagged.response_id` if an agent flags the reply (see [FEEDBACK_API.md](FEEDBACK_API.md)). It lets us find exactly which prompt versions produced the reply. A `request_id` replay returns the same `response_id`. Additive field: clients that ignore unknown fields are unaffected. |
 
 Handoff is decided two ways: the model calls its `request_human_handoff` tool, or a keyword
 backstop on the customer's last message matches (refund, charged twice, complaint, scam, "talk to

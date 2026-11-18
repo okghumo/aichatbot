@@ -5,6 +5,7 @@ always authenticated with CHAT_API_KEY, one JSON body instead of an SSE
 stream, machine-readable handoff / session-cap flags, and request_id replay
 so a CRM retry never re-runs tools. /api/chat is untouched by any of this.
 """
+import asyncio
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app import session_store
+from app.prompt_store import log_response
 from app.session_store import mask_session_id
 from app.config import settings
 from app.emoji_limit import limit_emojis
@@ -73,6 +75,7 @@ class ChatV2Response(BaseModel):
     handoff_reason: str | None = None
     session_capped: bool = False
     error: str | None = None
+    response_id: str | None = None   # our id for this reply; the CRM sends it back in feedback (flagged.response_id)
 
 
 async def _claim(key: str | None) -> tuple[str, str | None]:
@@ -129,7 +132,13 @@ def _make_result(request: ChatRequest, session_id: str, parts: list[str], error:
     return ChatV2Response(
         session_id=session_id, reply=reply, messages=[reply] if fixed else _split_messages(reply),
         handoff=bool(reason), handoff_reason=reason, session_capped=capped, error=error,
+        response_id=f"resp_{uuid.uuid4().hex[:24]}" if reply else None,
     )
+
+
+async def _log_response(result: ChatV2Response, request: ChatRequest) -> None:
+    if result.response_id:   # a DB hiccup must never cost the customer their reply
+        await asyncio.to_thread(log_response, result.response_id, result.session_id, request.request_id)
 
 
 def _sse(payload: dict) -> str:
@@ -170,6 +179,7 @@ async def chat_v2_stream(request: ChatRequest, http_request: Request) -> Streami
             elif payload.get("status"):
                 yield _sse({"status": payload["status"], "done": False})
         result = _make_result(request, session_id, parts, error, capped, handoff_state)
+        await _log_response(result, request)
         yield _sse({"done": True, **result.model_dump()})
 
     return StreamingResponse(frames(), media_type="text/event-stream")
@@ -205,6 +215,7 @@ async def chat_v2(request: ChatRequest, http_request: Request, response: Respons
             capped = capped or bool(payload.get("session_capped"))
 
         result = _make_result(request, session_id, parts, error, capped, handoff_state)
+        await _log_response(result, request)
     except BaseException:
         if state == "new":
             await _store(key, ChatV2Response(session_id=session_id, reply="", error="aborted"))

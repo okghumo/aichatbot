@@ -116,6 +116,25 @@ class Settings(BaseSettings):
     clamd_host: str = "localhost"
     clamd_port: int = 3310
 
+    # SQLite file: feedback inbox, editable-prompt store + history, reply log (app/db.py).
+    # In Docker point this at a mounted volume or it is lost on redeploy.
+    db_path: str = "data/bucky.db"
+    # Feedback from the CRM (POST /api/v2/feedback): hard caps on one request.
+    feedback_max_bytes: int = 1_000_000
+    feedback_max_messages: int = 500
+    # Editable prompts: how many OLD versions to keep per prompt, and for how long.
+    prompt_history_keep: int = 2
+    prompt_history_days: int = 45
+    # Largest an editable prompt may be, and the smallest a change may shrink it to (fraction of the old text).
+    prompt_max_bytes: int = 120_000
+    prompt_min_ratio: float = 0.5
+    # Guards /api/admin/prompts/* and /api/admin/feedback/*. Blank = those endpoints return 503.
+    admin_api_key: str = ""
+    # The proposer turns approved feedback into DRAFT prompt edits (a human still approves them). Off by default.
+    proposer_enabled: bool = False
+    proposer_model: str = ""                 # blank = use llm_model
+    proposer_interval_seconds: int = 600
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property

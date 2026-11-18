@@ -108,6 +108,12 @@ Backend module map (`backend/app/`):
 - `rate_limit.py` — per-IP sliding-window `RateLimitMiddleware`
   (`ponytail`-tagged in-memory implementation — see the file for the
   documented upgrade path).
+- `db.py` — SQLite (feedback inbox, editable prompts + history, reply log); only module that touches the DB.
+- `prompt_store.py` — the 3 editable prompts (knowledge base, WhatsApp persona/style) live here, not read
+  from files: live row + at most 2 old versions for 45 days, rollback, drafts. Falls back to `data/*.md`.
+- `feedback.py` — `POST /api/v2/feedback` (CRM feedback, idempotent on `feedback_id`); see `FEEDBACK_API.md`.
+- `feedback_proposer.py` / `admin_prompts.py` — feedback → *draft* prompt edit (never live) and the
+  `ADMIN_API_KEY`-guarded endpoints to approve/reject/roll back. Rules in `data/locked/` are not editable via the store.
 - `tools.py` — native tool functions (e.g. lead capture) + their schemas.
 - `config.py` / `schemas.py` — `Settings` (env-driven, only the LLM key has
   no default) and Pydantic request/response models.

@@ -58,3 +58,5 @@ data_scraping_india_adventure_sports/
 # Local planning/research docs, not for commit
 DATA_COLLECTION_PLAN.md
 backend/data/chat_playbook.md
+
+backend/data/bucky.db*

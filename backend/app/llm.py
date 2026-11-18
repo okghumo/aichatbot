@@ -23,6 +23,7 @@ from typing import AsyncGenerator
 
 import litellm
 
+from app import prompt_store
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -112,23 +113,12 @@ WHATSAPP_FORMAT_PROMPT = (
 )
 MAX_OUTPUT_TOKENS = 1500
 
-_whatsapp_style_cache: str | None = None
-
-
 def _whatsapp_style() -> str:
-    """WhatsApp-only persona (data/whatsapp_persona.md) + human texting style
-    (data/whatsapp_style.md), with the persona's name filled in. Read once.
-    Missing files = no block; the format prompt alone still applies."""
-    global _whatsapp_style_cache
-    if _whatsapp_style_cache is None:
-        folder = Path(settings.system_prompt_file).parent
-        parts = [
-            (folder / name).read_text(encoding="utf-8")
-            for name in ("whatsapp_persona.md", "whatsapp_style.md")
-            if (folder / name).exists()
-        ]
-        _whatsapp_style_cache = "\n\n".join(parts).replace("{name}", settings.whatsapp_persona_name).replace("{desk_phone}", BOOKING_DESK_PHONE)
-    return _whatsapp_style_cache
+    """WhatsApp-only persona (whatsapp_persona) + human texting style (whatsapp_style), with the persona's
+    name filled in. Both come from the prompt store (SQLite, falls back to data/*.md). Missing = no block;
+    the format prompt alone still applies."""
+    parts = [text for text in (prompt_store.get("whatsapp_persona"), prompt_store.get("whatsapp_style")) if text]
+    return "\n\n".join(parts).replace("{name}", settings.whatsapp_persona_name).replace("{desk_phone}", BOOKING_DESK_PHONE)
 
 
 # Edited reel / edited video: a hard business fact, so it lives in code, not only in prompt prose.
@@ -259,7 +249,6 @@ def _wants_knowledge(latest_user_text: str) -> bool:
 
 
 # -- Cached base prompt (file doesn't change at runtime) ---------------------
-_base_prompt_cache: str | None = None
 
 
 
@@ -357,10 +346,10 @@ LIVE_CATALOG_TOOLS_PROMPT = (
 )
 
 def _load_base_prompt() -> str:
-    global _base_prompt_cache
-    if _base_prompt_cache is None:
-        _base_prompt_cache = Path(settings.system_prompt_file).read_text(encoding="utf-8")
-    return _base_prompt_cache
+    text = prompt_store.get("knowledge_base")
+    if text is None:   # no row and no file: same failure the old direct file read gave
+        raise FileNotFoundError(settings.system_prompt_file)
+    return text
 
 
 async def _resolve_message_content(msg: ChatMessage) -> str | list[dict]:

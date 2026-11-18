@@ -1,4 +1,5 @@
 """POST /api/v2/chat: auth, JSON contract, handoff (tool + backstop), idempotency."""
+import re
 import asyncio
 import json
 
@@ -60,7 +61,9 @@ def test_json_contract_and_default_channel(monkeypatch):
     _fake_stream(monkeypatch, OK_FRAMES, calls=calls)
     r = client.post("/api/v2/chat", json=_body(), headers=AUTH)
     assert r.status_code == 200
-    assert r.json() == {
+    body = r.json()
+    assert re.fullmatch(r"resp_[0-9a-f]{24}", body.pop("response_id"))   # our id for the reply, echoed back in CRM feedback
+    assert body == {
         "session_id": "wa-1-1", "reply": "Hello there", "messages": ["Hello there"], "handoff": False,
         "handoff_reason": None, "session_capped": False, "error": None,
     }
@@ -343,3 +346,16 @@ def test_empty_reply_without_error_is_reported_as_an_error(monkeypatch):
     _fake_stream(monkeypatch, [_frame(delta="", done=True)])
     body = client.post("/api/v2/chat", json=_body("what is the weather like on mars today"), headers=AUTH).json()
     assert body["reply"] == "" and body["messages"] == [] and body["error"] == "empty_reply"
+
+
+def test_response_id_is_logged_with_prompt_versions_and_replayed_unchanged(monkeypatch):
+    from app import db
+    monkeypatch.setattr(session_store, "redis_client", _IdemRedis())
+    _fake_stream(monkeypatch, OK_FRAMES)
+    body = {**_body(), "request_id": "req-9"}
+    first = client.post("/api/v2/chat", json=body, headers=AUTH).json()
+    again = client.post("/api/v2/chat", json=body, headers=AUTH).json()
+    assert first["response_id"] == again["response_id"]
+    [row] = db.query("SELECT * FROM response_log")
+    assert row["response_id"] == first["response_id"] and row["request_id"] == "req-9"
+    assert json.loads(row["prompt_versions_json"]) == {"knowledge_base": 1, "whatsapp_persona": 1, "whatsapp_style": 1}

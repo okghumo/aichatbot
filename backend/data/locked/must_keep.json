@@ -1,0 +1,17 @@
+{
+  "knowledge_base": [
+    "## Scope & Safety Rules",
+    "## Medical Contraindications & Physical Limits",
+    "## Safety & Certification Facts",
+    "## Live catalog is the source of truth",
+    "## When to escalate to a human"
+  ],
+  "whatsapp_persona": [
+    "{name}",
+    "{desk_phone}",
+    "Never say or imply that you are a human"
+  ],
+  "whatsapp_style": [
+    "{desk_phone}"
+  ]
+}

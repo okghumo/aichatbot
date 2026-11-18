@@ -14,6 +14,10 @@ from fastapi.responses import StreamingResponse
 from app.config import settings
 from app.crm_chat import router as crm_router
 from app.followup import router as followup_router
+from app.feedback import router as feedback_router
+from app.admin_prompts import router as admin_router
+from app.feedback_proposer import proposer_loop
+from app import prompt_store
 from app.dashboard import get_summary, idle_scan_loop, list_summaries
 from app.llm import stream_chat_response
 from app.mcp_client import close_http_client
@@ -50,8 +54,13 @@ async def lifespan(app: FastAPI):
     )
     await init_redis()
     scan_task = asyncio.create_task(idle_scan_loop())
+    maintenance_task = asyncio.create_task(prompt_store.maintenance_loop())
+    proposer_task = asyncio.create_task(proposer_loop()) if settings.proposer_enabled else None
     yield
     scan_task.cancel()
+    maintenance_task.cancel()
+    if proposer_task:
+        proposer_task.cancel()
     await close_redis()
     await close_http_client()
     logger.info("Shutting down")
@@ -69,6 +78,8 @@ app = FastAPI(
 
 app.include_router(crm_router)
 app.include_router(followup_router)
+app.include_router(feedback_router)
+app.include_router(admin_router)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,

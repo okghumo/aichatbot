@@ -51,6 +51,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CLAMD_HOST: clamav
       CLAMD_PORT: 3310
+      DB_PATH: /var/lib/bucky/bucky.db   # feedback + editable prompts (SQLite); keep this volume and back it up
+    volumes:
+      - bucky_db:/var/lib/bucky
     ports:
       - "8000:8000"
     depends_on:
@@ -75,6 +78,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  bucky_db:
   weaviate_data:
   redis_data:
   clamav_data:

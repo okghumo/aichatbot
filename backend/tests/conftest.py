@@ -73,3 +73,14 @@ def _reset_forced_choice_memory():
     llm._forced_choice_rejected.clear()
     yield
     llm._forced_choice_rejected.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    """Every test gets its own empty SQLite file and a cold prompt cache (seeded from data/*.md on first use)."""
+    from app import prompt_store
+    from app.config import settings
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "bucky.db"))
+    prompt_store.reload()
+    yield
+    prompt_store.reload()
