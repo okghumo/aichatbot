@@ -21,6 +21,17 @@ def _keys(monkeypatch):
     monkeypatch.setattr(settings, "admin_api_key", "test-admin-key")
 
 
+@pytest.fixture(autouse=True)
+def mails(monkeypatch):
+    """Capture alert emails (never send real ones)."""
+    sent = []
+
+    async def fake(subject, body):
+        sent.append((subject, body))
+    monkeypatch.setattr(feedback_proposer, "send_notice", fake)
+    return sent
+
+
 def _model_says(monkeypatch, decision):
     async def fake(**kwargs):
         fake.seen = kwargs
@@ -117,3 +128,20 @@ def test_feedback_stats_count_by_status(monkeypatch):
     _submit_and_propose()
     stats = client.get("/api/admin/feedback/stats", headers=ADMIN).json()
     assert stats == {"feedback_by_status": {"wont_apply": 1}, "pending_drafts": 0}
+
+
+def test_pending_draft_emails_and_a_big_change_is_flagged(monkeypatch, mails):
+    _model_says(monkeypatch, {"action": "edit", "prompt": "whatsapp_style", "old": "", "new": "- small", "reason": "r"})
+    _submit_and_propose()
+    assert len(mails) == 1 and "waiting for approval" in mails[0][0] and "BIG" not in mails[0][0]
+    mails.clear()
+    monkeypatch.setattr(settings, "big_change_ratio", 0.0)   # any change now counts as big
+    _post(_item(feedback_id="fb-2"))
+    client.post("/api/admin/feedback/propose", headers=ADMIN)
+    assert mails[0][0].startswith("BIG CHANGE:")
+
+
+def test_refused_too_big_proposal_emails_a_human(monkeypatch, mails):
+    _model_says(monkeypatch, {"action": "edit", "prompt": "whatsapp_style", "old": "", "new": "x" * (settings.prompt_max_bytes + 1), "reason": "r"})
+    _submit_and_propose()
+    assert _status()["status"] == "wont_apply" and "REFUSED" in mails[0][0]

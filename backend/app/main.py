@@ -18,6 +18,7 @@ from app.feedback import router as feedback_router
 from app.admin_prompts import router as admin_router
 from app.feedback_proposer import proposer_loop
 from app import prompt_store
+from app.llm_health import llm_health_loop
 from app.dashboard import get_summary, idle_scan_loop, list_summaries
 from app.llm import stream_chat_response
 from app.mcp_client import close_http_client
@@ -56,8 +57,11 @@ async def lifespan(app: FastAPI):
     scan_task = asyncio.create_task(idle_scan_loop())
     maintenance_task = asyncio.create_task(prompt_store.maintenance_loop())
     proposer_task = asyncio.create_task(proposer_loop()) if settings.proposer_enabled else None
+    health_task = asyncio.create_task(llm_health_loop()) if settings.llm_health_enabled else None
     yield
     scan_task.cancel()
+    if health_task:
+        health_task.cancel()
     maintenance_task.cancel()
     if proposer_task:
         proposer_task.cancel()

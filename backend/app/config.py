@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     smtp_user: str = ""
     smtp_pass: str = ""
     smtp_to: str = ""
+    llm_health_enabled: bool = True          # hourly 1-token LLM ping; failure emails SMTP_TO
+    llm_health_interval_seconds: int = 3600
 
     # Attachments (§4) — all optional; the feature no-ops if attachment_ids
     # is never sent, same pattern as MCP_SERVER_URL/WEAVIATE_URL.
@@ -134,6 +136,8 @@ class Settings(BaseSettings):
     proposer_enabled: bool = False
     proposer_model: str = ""                 # blank = use llm_model
     proposer_interval_seconds: int = 600
+    # A draft changing the live prompt's length by at least this fraction gets a BIG CHANGE email (to SMTP_TO).
+    big_change_ratio: float = 0.2
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

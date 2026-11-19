@@ -12,6 +12,7 @@ import litellm
 
 from app import db, prompt_store
 from app.config import settings
+from app.notifier import send_notice
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +80,25 @@ async def propose_one(feedback_id: str, payload: dict) -> str:
             status, note = "wont_apply", str(decision.get("reason") or "no change needed")[:500]
         else:
             name, content, reason = build_content(decision)
+            live = prompt_store.get(name) or ""
             draft_id = await asyncio.to_thread(prompt_store.create_draft, name, content, reason, feedback_id)
             status, note = "proposed", f"draft {draft_id} for {name}"
+            change = abs(len(content) - len(live)) / max(len(live), 1)
+            big = change >= settings.big_change_ratio
+            await send_notice(
+                f"{'BIG CHANGE: ' if big else ''}Bucky prompt draft #{draft_id} waiting for approval",
+                f"A feedback item produced a draft edit to the '{name}' prompt. It is NOT live until approved.\n\n"
+                f"Draft id: {draft_id}\nFeedback id: {feedback_id}\n"
+                f"Size change: {change:.0%} of the live prompt{' (BIG)' if big else ''}\nReason: {reason}\n\n"
+                f"Review: GET /api/admin/prompts/drafts\nApprove: POST /api/admin/prompts/drafts/{draft_id}/approve\n"
+                f"Reject: POST /api/admin/prompts/drafts/{draft_id}/reject\n")
     except (ValueError, prompt_store.PromptChangeError) as exc:   # JSONDecodeError is a ValueError
         status, note = "wont_apply", f"proposal refused: {exc}"[:500]
+        if isinstance(exc, prompt_store.PromptChangeError):   # e.g. too big / too much removed: a human should know
+            await send_notice(
+                "Bucky prompt change REFUSED (too big or unsafe)",
+                f"Feedback id: {feedback_id}\nThe proposed edit was blocked by the safety checks and was not saved as a draft.\n"
+                f"Why: {exc}\n")
     await asyncio.to_thread(_set_status, feedback_id, status, note)
     return status
 

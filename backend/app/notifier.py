@@ -155,3 +155,8 @@ async def send_critical_alert(alert_type: str, error_message: str, context: str 
     """Async wrapper for callers already running on the event loop — runs the
     (blocking) sync core in a worker thread so it never stalls the loop."""
     await asyncio.to_thread(send_critical_alert_sync, alert_type, error_message, context)
+
+
+async def send_notice(subject: str, body: str) -> None:
+    """Plain email to SMTP_TO (no debounce: each draft is its own event). Never raises; skipped if SMTP is unset."""
+    await asyncio.to_thread(_send_email_sync, subject, body)
