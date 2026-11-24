@@ -36,7 +36,7 @@ def _refuse(exc: prompt_store.PromptChangeError) -> HTTPException:
 
 @router.get("/prompts")
 async def list_prompts(http_request: Request) -> dict:
-    """Each editable prompt: live version, who/when, and its old versions (at most 2) with days left."""
+    """Each editable prompt: live version, who/when, and its old versions (at most PROMPT_HISTORY_KEEP) with days left."""
     _auth(http_request)
 
     def load() -> list[dict]:

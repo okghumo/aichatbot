@@ -36,7 +36,8 @@ def test_change_goes_live_and_old_version_moves_to_history():
     assert db.query("SELECT content FROM prompt_history WHERE id = ?", (old["id"],))[0]["content"] == before
 
 
-def test_history_keeps_only_the_two_most_recent_old_versions():
+def test_history_keeps_only_the_n_most_recent_old_versions(monkeypatch):
+    monkeypatch.setattr(settings, "prompt_history_keep", 2)   # exercise the cap regardless of the production default
     for i in range(3):
         _edit("whatsapp_style", f"change {i}")   # live is now v4; v1 was the oldest
     assert [h["version"] for h in prompt_store.history("whatsapp_style")] == [3, 2]

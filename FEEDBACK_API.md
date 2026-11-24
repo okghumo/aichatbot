@@ -197,7 +197,7 @@ Please keep the `/api/v2/chat` call pattern unchanged: `session_id` and `request
 
 1. Stored with status `received`.
 2. A reviewer-controlled process may turn it into a **draft** edit to one of three prompts (the WhatsApp persona, the WhatsApp style, the knowledge base). A draft is never live.
-3. A human on our team approves or rejects the draft. Approved drafts go live immediately; the previous prompt is kept for 45 days (last 2 versions) so we can go back.
+3. A human on our team approves or rejects the draft. Approved drafts go live immediately; the previous prompts are kept for 45 days (last 5 versions) so we can go back.
 4. Everything else (code, tools, safety and handoff rules, offers and price messages) is outside what this process can change.
 
 Nothing in this flow changes how Bucky answers customers until a human approves a draft.

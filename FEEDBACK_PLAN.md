@@ -13,7 +13,7 @@ keep editable prompts in SQLite instead of GitHub.
 | Phase | State | Where |
 |---|---|---|
 | 1. Receiver + `response_id` | Done | `app/feedback.py`, `app/crm_chat.py`, `app/db.py` |
-| 2. Prompt store with 2-version / 45-day history | Done | `app/prompt_store.py`, `app/llm.py`, `data/locked/must_keep.json` |
+| 2. Prompt store with 5-version / 45-day history | Done | `app/prompt_store.py`, `app/llm.py`, `data/locked/must_keep.json` |
 | 3. Proposer + admin review/rollback | Done (proposer **off** by default) | `app/feedback_proposer.py`, `app/admin_prompts.py`, `data/locked/proposer_rules.md` |
 | 4. Status callback to the CRM | **Not built** (needs the CRM's URL and secret) | see `FEEDBACK_API.md` section 8 |
 | 5. Backups / retention | **Not built**: nightly copy of the SQLite file to S3 and a retention period for raw transcripts are still to do | |
@@ -32,6 +32,10 @@ per draft so this is visible before anyone tries to approve it. See `app/prompt_
 
 **Not doing (per decision, 2026-11-24):** nightly SQLite backups to S3 (Phase 5) are explicitly
 out of scope for now. Phase 4 (CRM status callback) stays on standby, not started.
+
+**Changed (2026-11-24): `PROMPT_HISTORY_KEEP` raised from 2 to 5.** Old prompt versions are now
+kept for 5 changes per prompt name (still capped at 45 days each) instead of 2. Pure config change
+(`app/config.py`, `backend/.env.example`); the mechanism itself (section 3.1) is unchanged.
 
 **Where the build differs from the plan above**
 - Drafts are applied as a *targeted edit* (exact old text → new text, or append), not a full rewrite, so diffs stay small and the model cannot silently drop sections.
@@ -56,7 +60,7 @@ out of scope for now. Phase 4 (CRM status callback) stays on standby, not starte
 
 | Call | Purpose |
 |---|---|
-| `GET /api/admin/prompts` | Live version of each prompt, plus its old versions (max 2) with `days_left` |
+| `GET /api/admin/prompts` | Live version of each prompt, plus its old versions (max 5) with `days_left` |
 | `GET /api/admin/prompts/drafts?status=pending` | Proposed edits with a diff against the live prompt |
 | `POST /api/admin/prompts/drafts/{id}/approve` `{"by": "name"}` | Make it live; the old prompt goes to history |
 | `POST /api/admin/prompts/drafts/{id}/reject` `{"by": "name"}` | Discard; feedback becomes `wont_apply` |
@@ -107,27 +111,27 @@ CRM (approved item)
    │
    ├─ reject → draft "rejected", feedback → "wont_apply", callback to CRM
    └─ approve → run golden checks → ONE TRANSACTION (see 5.1):
-                 current live prompt → prompt_history (keep max 2, 45 days)
+                 current live prompt → prompt_history (keep max 5, 45 days)
                  draft → live `prompts` row
                  → reload cache → feedback → "applied" → callback to CRM
 ```
 
 Key rule: **the model only ever creates drafts. A human activates them.**
 
-### 3.1 Prompt versioning rule (the "2 old prompts for 45 days" rule)
+### 3.1 Prompt versioning rule (the "5 old prompts for 45 days" rule)
 
 - `prompts` (main table) holds **only the live prompt**, one row per prompt name.
-- `prompt_history` holds the **previous** prompts, **at most 2 per prompt name**, each kept **at most 45 days**.
+- `prompt_history` holds the **previous** prompts, **at most 5 per prompt name** (`PROMPT_HISTORY_KEEP`), each kept **at most 45 days**.
 - When a change is approved for prompt `X`:
-  1. If `prompt_history` already has 2 rows for `X` → **delete the oldest**.
+  1. If `prompt_history` already has 5 rows for `X` → **delete the oldest**.
   2. Copy the current live `X` into `prompt_history` (stamped with the time it was retired).
   3. Overwrite the live `X` row with the new content.
-  4. Steps 1–3 happen in **one SQLite transaction**: either all happen or none, so we can never lose the live prompt or end up with 3 old copies.
-- Example, prompt `whatsapp_persona`, history already holds v1 and v2, live is v3:
-  - Change request → v4 arrives.
-  - v1 (oldest) is deleted. v3 moves into history. History is now v2, v3. Live is v4.
+  4. Steps 1–3 happen in **one SQLite transaction**: either all happen or none, so we can never lose the live prompt or end up with 6 old copies.
+- Example, prompt `whatsapp_persona`, history already holds v1 through v5, live is v6:
+  - Change request → v7 arrives.
+  - v1 (oldest) is deleted. v6 moves into history. History is now v2..v6. Live is v7.
 - Rollback = **swap**: take a chosen history row, make it live, and move the current live prompt into history (the restored row leaves history first, so nothing is deleted by the swap). That way a rollback is itself undoable.
-- A history row older than 45 days is deleted, even if the cap of 2 is not reached. So there may be fewer than 2 after a quiet period. The very first live prompt (the seed) has no history until the first change.
+- A history row older than 45 days is deleted, even if the cap of 5 is not reached. So there may be fewer than 5 after a quiet period. The very first live prompt (the seed) has no history until the first change.
 
 ## 4. What can and cannot be changed
 
@@ -174,7 +178,7 @@ prompts                                     -- MAIN table: the LIVE prompt only
   source        TEXT   -- seed | feedback:<feedback_id> | rollback | manual
   updated_by    TEXT, updated_at TEXT
 
-prompt_history                              -- OLD prompts: max 2 per name, 45 days
+prompt_history                              -- OLD prompts: max 5 per name, 45 days
   id            INTEGER PRIMARY KEY
   name          TEXT                      -- same names as `prompts`
   version       INTEGER                   -- the version number it had when live
@@ -182,7 +186,7 @@ prompt_history                              -- OLD prompts: max 2 per name, 45 d
   source        TEXT
   retired_at    TEXT                      -- when it stopped being live; the 45 days count from here
   UNIQUE(name, version)
-  -- the "max 2" and "45 days" rules are enforced in code, inside the
+  -- the "max 5" and "45 days" rules are enforced in code, inside the
   -- same transaction as the swap (section 3.1), plus a daily purge.
 
 prompt_drafts                               -- proposed changes waiting for a human
@@ -208,7 +212,7 @@ exactly which prompt versions produced it. (If that version has since aged out o
 | Rule | Value | Where enforced |
 |---|---|---|
 | Live prompts per name | exactly 1 (`prompts` primary key) | schema |
-| Old prompts per name | **max 2** | swap transaction: delete oldest first |
+| Old prompts per name | **max 5** | swap transaction: delete oldest first |
 | Old prompt lifetime | **45 days** from `retired_at` | daily purge job + checked again on every swap |
 | Rejected / approved drafts | keep 45 days for the audit trail, then delete | same daily purge |
 | Feedback items | decide in Phase 5 (they hold customer chat) | Phase 5 |
@@ -260,7 +264,7 @@ Files: new `app/feedback_proposer.py`, new `app/admin_prompts.py`; edit `app/mai
 1. **Proposer** (background loop like `dashboard.idle_scan_loop`, or a manual trigger first): for each `received` item, give a model the item, transcript, and the live content of the allowlisted prompts. Ask for: which prompt to change (from the allowlist) and the new full text, plus a one-line reason.
 2. Validate the output (allowlist, size, shrink limits). Insert a `draft` version. Set the feedback status `proposed`. Use `litellm` like the rest of the app; low frequency, so cost is small.
 3. **Admin endpoints**, protected by a **separate** `ADMIN_API_KEY` (not the CRM chat key):
-   - `GET /admin/prompts/drafts` — list pending drafts with a diff against the live prompt; also list each prompt's history (up to 2 old versions with their `retired_at` and days left).
+   - `GET /admin/prompts/drafts` — list pending drafts with a diff against the live prompt; also list each prompt's history (up to 5 old versions with their `retired_at` and days left).
    - `POST /admin/prompts/{id}/approve` and `/reject`.
    - `POST /admin/prompts/{name}/rollback/{version}`.
 4. Approve = run the golden check (section 8); if it passes, call `prompt_store.apply()` (section 3.1), mark the draft approved, `reload()`.
@@ -288,7 +292,7 @@ Files: new `app/feedback_proposer.py`, new `app/admin_prompts.py`; edit `app/mai
 | `FEEDBACK_MAX_BYTES` | Default 1,000,000 |
 | `FEEDBACK_MAX_MESSAGES` | Default 500 |
 | `PROPOSER_ENABLED` | Default false until Phase 3 is reviewed |
-| `PROMPT_HISTORY_KEEP` | Old prompts kept per name, default 2 |
+| `PROMPT_HISTORY_KEEP` | Old prompts kept per name, default 5 |
 | `PROMPT_HISTORY_DAYS` | Days an old prompt is kept, default 45 |
 | `CRM_FEEDBACK_WEBHOOK_URL` / `_SECRET` | Phase 4 callback; blank = off |
 
@@ -306,7 +310,7 @@ Files: new `app/feedback_proposer.py`, new `app/admin_prompts.py`; edit `app/mai
 |---|---|
 | SQLite file lost with the box | Volume + nightly S3 backup; the files in git act as the seed/fallback |
 | Several backend instances later | Move `db.py` to RDS; it is the only module that touches the DB |
-| A bad draft goes live | Human approval + golden checks + one-step rollback to either of the last 2 live prompts (45 days) |
+| A bad draft goes live | Human approval + golden checks + one-step rollback to any of the last 5 live prompts (45 days) |
 | Prompt edits are no longer visible in git | Version rows with author and time; the admin diff view |
 | Feedback conflicts with locked rules | Locked prompt is last and wins; proposer is told to ignore requests to change locked behaviour |
 | Prompt caching cost | A new version changes the cached prompt once; expected and small |

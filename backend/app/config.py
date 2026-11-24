@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     feedback_max_bytes: int = 1_000_000
     feedback_max_messages: int = 500
     # Editable prompts: how many OLD versions to keep per prompt, and for how long.
-    prompt_history_keep: int = 2
+    prompt_history_keep: int = 5
     prompt_history_days: int = 45
     # Largest an editable prompt may be, and the smallest a change may shrink it to (fraction of the old text).
     prompt_max_bytes: int = 120_000
