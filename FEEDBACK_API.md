@@ -1,7 +1,9 @@
 # Bucky feedback API: what the CRM sends and what Bucky returns
 
 **For:** the bucketlistt CRM team
-**Status:** implemented on branch `feat/ai-suggested-prompt-changes` (not yet in `main`). This is the final contract: it answers the questions in your proposal and replaces it.
+**Status:** built and running on our server, built from branch `feat/ai-suggested-prompt-changes` (not yet merged to `main`). This is the final contract: it answers the questions in your proposal and replaces it. Updated 2026-11-18.
+
+**Base URL:** the same host you already use for `/api/v2/chat` (`{BUCKY_API_URL}`). Nothing new to configure except the new path and the stored `response_id`.
 
 ## 1. What changes for you (summary)
 
@@ -181,7 +183,17 @@ curl -s -X POST "$BUCKY_API_URL/api/v2/feedback" \
 # same again:  {"received":true,"ref":"bf_…(same)","duplicate":true}
 ```
 
-## 10. What happens to an item on our side (for context)
+## 10. Going live: suggested order
+
+1. **Now, no risk:** start storing `response_id` from `/api/v2/chat` replies (section 6). It is already returned today. Messages sent before you start storing it simply have no `response_id`; send `null` for those.
+2. **Test the endpoint** with the curl in section 9, using ids that start with `fb_test_`. There is **no delete endpoint**: test items stay in our database until we clear them by hand, so tell us when you are done testing and we will remove every `fb_test_` item.
+3. Check the three outcomes once each: a first send (`200`, `ref`), the same send again (`200`, `duplicate: true`, same `ref`), and a deliberately bad body (`422` with a readable `error`).
+4. Switch on sending for real approved items, with your retry rules from section 5.
+5. Tell us the date you go live so we watch the first items.
+
+Please keep the `/api/v2/chat` call pattern unchanged: `session_id` and `request_id` must be exactly what you later send in `bucky.session_id` / `bucky.request_id`.
+
+## 11. What happens to an item on our side (for context)
 
 1. Stored with status `received`.
 2. A reviewer-controlled process may turn it into a **draft** edit to one of three prompts (the WhatsApp persona, the WhatsApp style, the knowledge base). A draft is never live.

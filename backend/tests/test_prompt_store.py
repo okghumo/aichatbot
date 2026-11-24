@@ -131,3 +131,25 @@ def test_drafts_approve_reject_and_feedback_status():
     assert status == {"fb_1": "applied", "fb_2": "wont_apply"}
     with pytest.raises(prompt_store.PromptChangeError):
         prompt_store.approve_draft(d1, "boss")   # already decided
+
+
+def test_approving_a_second_draft_against_a_moved_prompt_does_not_clobber_the_first():
+    """Two drafts queued back-to-back off the same live prompt; approving both in turn must not lose either change."""
+    with db.tx() as conn:
+        for fid in ("fb_1", "fb_2"):
+            conn.execute("INSERT INTO feedback VALUES (?, 'now', 'tone', NULL, NULL, NULL, '{}', 'proposed', 'bf_x', NULL)", (fid,))
+    live = prompt_store.get("whatsapp_style")
+    d1 = prompt_store.create_draft("whatsapp_style", live + "\n- A\n", "because", "fb_1")
+    d2 = prompt_store.create_draft("whatsapp_style", live + "\n- B\n", "because", "fb_2")   # same base_version as d1
+
+    assert prompt_store.approve_draft(d1, "boss") == 2
+    assert "- A" in prompt_store.get("whatsapp_style")
+
+    with pytest.raises(prompt_store.PromptChangeError, match="stale"):
+        prompt_store.approve_draft(d2, "boss")   # would have wiped out "- A" if applied blindly
+
+    assert "- A" in prompt_store.get("whatsapp_style")   # d1's change survives
+    assert "- B" not in prompt_store.get("whatsapp_style")
+    assert [d["status"] for d in prompt_store.list_drafts("stale") if d["id"] == d2] == ["stale"]
+    # the underlying feedback item is re-queued, not lost, so the proposer can redraft it against v2
+    assert db.query("SELECT status FROM feedback WHERE feedback_id = 'fb_2'")[0]["status"] == "received"

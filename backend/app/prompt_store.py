@@ -176,12 +176,19 @@ def history(name: str) -> list[dict]:
 
 
 def create_draft(name: str, content: str, reason: str, feedback_id: str | None) -> int:
-    """Store a proposed change (NOT live). Refused if it would fail check_change against the live prompt."""
+    """Store a proposed change (NOT live). Refused if it would fail check_change against the live prompt.
+
+    Remembers the live `prompts.version` this draft was written against (base_version), so a later
+    approve can tell whether the prompt moved under it (see approve_draft) instead of silently clobbering
+    whatever got approved in between.
+    """
     check_change(name, get(name), content)
     with db.tx() as conn:
+        live = conn.execute("SELECT version FROM prompts WHERE name = ?", (name,)).fetchone()
         cur = conn.execute(
-            "INSERT INTO prompt_drafts (name, content, reason, feedback_id, created_at) VALUES (?, ?, ?, ?, ?)",
-            (name, content, reason, feedback_id, _now()))
+            "INSERT INTO prompt_drafts (name, content, reason, feedback_id, created_at, base_version) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, content, reason, feedback_id, _now(), live["version"] if live else 0))
         return cur.lastrowid
 
 
@@ -190,17 +197,38 @@ def list_drafts(status: str = "pending") -> list[dict]:
 
 
 def approve_draft(draft_id: int, by: str) -> int:
-    """Draft -> live, old live -> history, feedback -> applied: all in one transaction."""
+    """Draft -> live, old live -> history, feedback -> applied: all in one transaction.
+
+    If another draft for the same prompt was approved after this one was written (base_version no
+    longer matches the live version), this draft's content was computed against a prompt that no
+    longer exists: applying it would silently discard that other, already-approved change. Instead we
+    mark it 'stale', re-queue its feedback item to 'received' so the proposer redrafts it against the
+    now-current prompt, and refuse the approval — nothing is lost, nothing is silently clobbered.
+    """
     with db.tx() as conn:
         draft = conn.execute("SELECT * FROM prompt_drafts WHERE id = ? AND status = 'pending'", (draft_id,)).fetchone()
         if draft is None:
             raise PromptChangeError("no pending draft with that id")
-        source = f"feedback:{draft['feedback_id']}" if draft["feedback_id"] else "manual"
-        version = _apply(conn, draft["name"], draft["content"], source, by)
-        conn.execute("UPDATE prompt_drafts SET status='approved', decided_by=?, decided_at=? WHERE id=?", (by, _now(), draft_id))
-        if draft["feedback_id"]:
-            conn.execute("UPDATE feedback SET status='applied', note=? WHERE feedback_id=?",
-                         (f"{draft['name']} v{version}", draft["feedback_id"]))
+        live = conn.execute("SELECT version FROM prompts WHERE name = ?", (draft["name"],)).fetchone()
+        current_version = live["version"] if live else 0
+        stale = draft["base_version"] is not None and draft["base_version"] != current_version
+        if stale:
+            conn.execute("UPDATE prompt_drafts SET status='stale', decided_by=?, decided_at=? WHERE id=?", (by, _now(), draft_id))
+            if draft["feedback_id"]:
+                conn.execute(
+                    "UPDATE feedback SET status='received', note=? WHERE feedback_id=?",
+                    (f"draft {draft_id} went stale ('{draft['name']}' moved to v{current_version} under it); re-queued", draft["feedback_id"]))
+        else:
+            source = f"feedback:{draft['feedback_id']}" if draft["feedback_id"] else "manual"
+            version = _apply(conn, draft["name"], draft["content"], source, by)
+            conn.execute("UPDATE prompt_drafts SET status='approved', decided_by=?, decided_at=? WHERE id=?", (by, _now(), draft_id))
+            if draft["feedback_id"]:
+                conn.execute("UPDATE feedback SET status='applied', note=? WHERE feedback_id=?",
+                             (f"{draft['name']} v{version}", draft["feedback_id"]))
+    if stale:
+        raise PromptChangeError(
+            f"'{draft['name']}' changed to v{current_version} after this draft was written; "
+            "the draft is now stale and was re-queued for a fresh proposal instead of being applied")
     reload()
     return version
 

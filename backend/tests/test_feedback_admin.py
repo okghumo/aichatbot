@@ -123,6 +123,28 @@ def test_replace_edit_changes_exactly_one_place(monkeypatch):
     assert draft["content"] == live.replace(old, old + " (updated)", 1)
 
 
+def test_a_second_approval_against_a_moved_prompt_is_refused_and_requeued_not_clobbered(monkeypatch):
+    _model_says(monkeypatch, {"action": "edit", "prompt": "whatsapp_style", "old": "", "new": "- A", "reason": "r"})
+    _submit_and_propose()
+    _post(_item(feedback_id="fb-2"))
+    _model_says(monkeypatch, {"action": "edit", "prompt": "whatsapp_style", "old": "", "new": "- B", "reason": "r"})
+    client.post("/api/admin/feedback/propose", headers=ADMIN)
+    drafts = client.get("/api/admin/prompts/drafts", headers=ADMIN).json()["drafts"]
+    assert [d["stale"] for d in drafts] == [False, False]
+    d1, d2 = (d["id"] for d in drafts)
+
+    assert client.post(f"/api/admin/prompts/drafts/{d1}/approve", json={}, headers=ADMIN).status_code == 200
+    assert "- A" in prompt_store.get("whatsapp_style")
+
+    [stale_draft] = [d for d in client.get("/api/admin/prompts/drafts", headers=ADMIN).json()["drafts"] if d["id"] == d2]
+    assert stale_draft["stale"] is True
+    r = client.post(f"/api/admin/prompts/drafts/{d2}/approve", json={}, headers=ADMIN)
+    assert r.status_code == 422 and "stale" in r.json()["detail"]
+    assert "- A" in prompt_store.get("whatsapp_style") and "- B" not in prompt_store.get("whatsapp_style")
+    # requeued, not lost: it now shows up for a fresh proposal against the current (v2) prompt
+    assert db.query("SELECT status FROM feedback WHERE feedback_id = 'fb-2'")[0]["status"] == "received"
+
+
 def test_feedback_stats_count_by_status(monkeypatch):
     _model_says(monkeypatch, {"action": "no_change", "reason": "r"})
     _submit_and_propose()

@@ -43,15 +43,16 @@ CREATE TABLE IF NOT EXISTS prompt_history (
     UNIQUE (name, version)
 );
 CREATE TABLE IF NOT EXISTS prompt_drafts (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    reason      TEXT,
-    feedback_id TEXT,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    created_at  TEXT NOT NULL,
-    decided_by  TEXT,
-    decided_at  TEXT
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    reason       TEXT,
+    feedback_id  TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   TEXT NOT NULL,
+    decided_by   TEXT,
+    decided_at   TEXT,
+    base_version INTEGER
 );
 CREATE TABLE IF NOT EXISTS response_log (
     response_id          TEXT PRIMARY KEY,
@@ -75,6 +76,10 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")
     if str(path) not in _initialised:
         conn.executescript(SCHEMA)
+        try:   # ponytail: ad-hoc migration for DBs created before base_version existed; drop once all envs are rebuilt
+            conn.execute("ALTER TABLE prompt_drafts ADD COLUMN base_version INTEGER")
+        except sqlite3.OperationalError:
+            pass   # column already there
         _initialised.add(str(path))
     return conn
 

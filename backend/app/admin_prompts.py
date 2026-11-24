@@ -53,10 +53,12 @@ async def list_prompts(http_request: Request) -> dict:
 async def list_drafts(http_request: Request, status: str = "pending") -> dict:
     _auth(http_request)
     drafts = await asyncio.to_thread(prompt_store.list_drafts, status)
+    versions = await asyncio.to_thread(prompt_store.live_versions)
     for draft in drafts:
         live = prompt_store.get(draft["name"]) or ""
         draft["diff"] = "".join(difflib.unified_diff(
             live.splitlines(keepends=True), draft["content"].splitlines(keepends=True), "live", "draft", n=2))
+        draft["stale"] = draft["base_version"] is not None and draft["base_version"] != versions.get(draft["name"])
         del draft["content"]
     return {"drafts": drafts}
 

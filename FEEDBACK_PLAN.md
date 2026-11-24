@@ -18,12 +18,33 @@ keep editable prompts in SQLite instead of GitHub.
 | 4. Status callback to the CRM | **Not built** (needs the CRM's URL and secret) | see `FEEDBACK_API.md` section 8 |
 | 5. Backups / retention | **Not built**: nightly copy of the SQLite file to S3 and a retention period for raw transcripts are still to do | |
 
+**Fixed (2026-11-24): stale drafts no longer clobber each other.** Previously, two drafts queued
+against the same prompt each held a frozen full-text snapshot computed when they were *written*.
+Approving the first moved the prompt to v2; approving the second then silently overwrote it with a
+draft computed against v1, discarding the first (already-approved) change. Each draft now also
+records the live `prompts.version` it was written against (`base_version`). `approve_draft` checks
+that version at approval time: if it still matches, it applies as before; if the prompt moved under
+it, the draft is marked `stale`, its feedback item is reset to `received` so the proposer redrafts it
+against the now-current prompt, and the approval call fails with a clear 422 instead of applying. No
+auto-merge is attempted — a stale draft is simply redone against the latest prompt, never silently
+applied on top of a conflicting change. `GET /api/admin/prompts/drafts` now also returns `stale: bool`
+per draft so this is visible before anyone tries to approve it. See `app/prompt_store.approve_draft`.
+
+**Not doing (per decision, 2026-11-24):** nightly SQLite backups to S3 (Phase 5) are explicitly
+out of scope for now. Phase 4 (CRM status callback) stays on standby, not started.
+
 **Where the build differs from the plan above**
 - Drafts are applied as a *targeted edit* (exact old text → new text, or append), not a full rewrite, so diffs stay small and the model cannot silently drop sections.
 - "Golden chats" are **not** LLM-based. The gate is deterministic: allowlist of 3 prompts, size cap, may not shrink below 50%, `{name}` / `{desk_phone}` placeholders must survive, and the headings listed in `data/locked/must_keep.json` (safety, medical limits, handoff rule) must survive. A real golden-chat run against the model is a worthwhile next step.
 - `response_log` stores the prompt versions but not the tools called (the streaming loop does not expose them).
 - `price_overview.md` and `chat_playbook.md` are **not** editable (the playbook is not loaded by the code at all).
 - The locked rules are the code (`llm.py` prompts, `flow_guard`, sanitizer) and `data/locked/`; the existing `llm.py` prompt order is unchanged, so replies are identical before and after a prompt edit.
+
+**Server state (2026-11-18)**: the production EC2 runs the backend built **locally from this branch** (`docker build -t ghcr.io/okghumo/aichatbot-backend:latest ./backend`, then `docker compose -f docker-compose.prod.yml up -d --no-deps backend`), with `ADMIN_API_KEY` and `PROPOSER_ENABLED=false` added to `backend/.env`. The `bucky_db` volume was created on that first start.
+- **Merge to `main` before any other `main` deploy.** CI builds and pushes only from `main`; its next deploy runs `docker compose pull` and would replace this local image with main's, which has no `/api/v2/feedback`. Until the branch is merged, either avoid pushing to `main` or rebuild this branch's image afterwards.
+- The server checkout is on the feature branch: switch back (`git checkout main && git pull --ff-only`) once merged.
+- Rollback: `git checkout main && git pull --ff-only`, then `docker compose -f docker-compose.prod.yml pull backend && docker compose -f docker-compose.prod.yml up -d backend`. The feedback data stays in the volume.
+- The `ADMIN_API_KEY` used for the first start was a temporary one shown in chat: replace it with a fresh random value.
 
 **Deploy notes**
 - Both compose files now mount a `bucky_db` volume at `/var/lib/bucky` and set `DB_PATH`. **Back this volume up**: it holds feedback and prompt history.
